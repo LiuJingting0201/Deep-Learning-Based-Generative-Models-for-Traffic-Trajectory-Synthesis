@@ -193,16 +193,3 @@ TRAIN_STEPS=1 \
 bash scripts/run_smoke_pipeline.sh
 ```
 
-## Current Limitations
-
-- Original notebooks are preserved and are not edited by the refactor.
-- Full scientific-scale diffusion training has not been run from the refactored scripts yet.
-- DDPM training, sample generation, and FID evaluation are scriptified, but current DDPM/FID results are preliminary sanity checks.
-- Image-to-trajectory reconstruction is still not integrated; no reliable image-to-trajectory inverse pipeline has been found in the notebooks.
-- `Map_Matching` post-processes predicted coordinate sequences; it is not itself image-to-trajectory reconstruction.
-- Scripted FID evaluation is available, while the original FID notebook still contains obsolete Windows absolute paths.
-- Some notebook paths refer to generated intermediate folders that are not committed.
-- PyTorch/diffusers dependencies are intentionally separated into `requirements-train.txt` because they can be large.
-
-See [docs/pipeline_status.md](docs/pipeline_status.md) for the current notebook-to-pipeline mapping and known blockers.
-See [docs/weekly_report_refactoring_validation.md](docs/weekly_report_refactoring_validation.md) for the latest refactoring and validation report.
