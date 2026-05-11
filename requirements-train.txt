@@ -1,0 +1,6 @@
+-r requirements-core.txt
+accelerate
+datasets
+diffusers
+torch
+torchvision

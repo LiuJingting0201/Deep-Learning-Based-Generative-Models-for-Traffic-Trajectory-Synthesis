@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data and generated outputs
+data/raw/*
+data/processed/*
+results/*
+!results/.gitkeep
+!results/figures/
+!results/logs/
+!results/metrics/
+results/figures/*
+results/logs/*
+results/metrics/*
+GeneratedImages*/
+GeneratedImages_*/
+**/00_RGB_Images/**
+RGB_Images_PNG/
+RGB_Images_PNG_ReducedSize_*/
+01_RGB_Images_PNG_ReducedSize_*/
+Data_*/
+*.npy
+*.npz
+trajectories_prediction.pkl
+
+# Keep placeholder files
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!results/figures/.gitkeep
+!results/logs/.gitkeep
+!results/metrics/.gitkeep
+
+# OS and transferred metadata
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# Model artifacts
+checkpoints/
+**/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors

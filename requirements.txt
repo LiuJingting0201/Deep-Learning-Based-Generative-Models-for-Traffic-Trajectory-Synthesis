@@ -1,0 +1,2 @@
+# Compatibility install for the full smoke-tested environment.
+-r requirements-train.txt

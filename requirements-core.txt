@@ -1,0 +1,13 @@
+ipykernel
+jupyter
+matplotlib
+numpy
+opencv-python
+pandas
+Pillow
+pyts
+pytest
+PyYAML
+scikit-learn
+scipy
+tqdm

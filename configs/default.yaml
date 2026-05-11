@@ -1,0 +1,43 @@
+project:
+  name: cnr-trajectory-generation
+  seed: 42
+
+paths:
+  raw_data_dir: data/raw
+  processed_data_dir: data/processed
+  results_dir: results
+  figures_dir: results/figures
+  logs_dir: results/logs
+  metrics_dir: results/metrics
+
+data:
+  # TODO: Confirm canonical raw trajectory filename.
+  trajectory_file: gps_with_speed_224_UPDATED.xls
+  sequence_length: 224
+  image_size: 128
+
+encoding:
+  hilbert_eps: 0.0037
+  gaf_methods:
+    - summation
+    - difference
+  # TODO: Confirm whether MTF should remain part of the canonical RGB encoding.
+  use_mtf: true
+
+model:
+  type: ddpm_unet2d
+  image_size: 128
+  batch_size: 4
+  learning_rate: 0.0002
+  num_timesteps: 1000
+  num_epochs: 100
+
+reconstruction:
+  # TODO: Define the confirmed image-to-trajectory inverse pipeline.
+  method: TODO
+
+evaluation:
+  metrics:
+    - fid
+    - reconstruction_error
+    - dynamics_consistency
