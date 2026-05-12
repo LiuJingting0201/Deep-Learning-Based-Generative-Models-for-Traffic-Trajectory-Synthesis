@@ -289,6 +289,7 @@ After that, validate the full generated-image to decoded-trajectory to map-match
 - Remaining work includes larger DDPM training, more stable FID, strengthening the image-to-trajectory decoder, and validating generated-image-to-trajectory path-level quality.
 - A ResNet18 decoder ablation improved test ADE from 160.30 to 120.92 compared with the original CNN-FC decoder, suggesting that decoder capacity is one bottleneck, although residual reconstruction errors remain.
 - A delta-displacement representation ablation shows a trade-off: raw integrated ADE/FDE is worse than absolute x/y, but aligned-shape metrics improve substantially, suggesting better local shape encoding with accumulated drift in absolute reconstruction.
+- A 224x224 delta-displacement DDPM sanity run was completed. MSE-only training outperformed the notebook-style auxiliary loss on FID/KID and decoded-trajectory validity, suggesting that the original auxiliary losses are representation-specific and less suitable for delta-displacement images.
 
 ## Suggested Git Commit Message
 
@@ -691,6 +692,71 @@ The result should not be interpreted as simply showing that one representation i
 
 This remains a controlled representation ablation on real encoded images, not a final diffusion-generation result. A possible later direction is a hybrid representation that combines absolute placement with local delta-displacement dynamics, but that is not required for the current first-stage validation.
 
+### 224x224 Delta-Displacement DDPM Sanity and Auxiliary-Loss Ablation
+
+After validating the delta-displacement decoder on real encoded images, the next question was whether a DDPM can generate delta-displacement Hilbert/GAF/MTF images directly at 224x224. This matters because the decoder expects RGB 224x224 delta-displacement images; using 128x128 generated images resized to 224x224 would confound the generated-image decoding evaluation.
+
+The first 224x224 sanity run used the notebook-style auxiliary loss and saved outputs under:
+
+```text
+results/ddpm_delta_displacement_224_sanity/
+```
+
+The run used 224x224 images, 3000 optimizer steps, batch size 2, gradient accumulation 2, effective batch size 4, learning rate 1e-4, EMA enabled, and the notebook-style loss:
+
+```text
+mse_loss + 0.01 * R-channel symmetry loss + 0.01 * G-channel fixed diagonal loss
+```
+
+The final training loss was 0.03244. From 100 final generated EMA samples, the image-level metrics were FID 197.4561 and KID 0.22755 +/- 0.00648. The generated images could be decoded, so the end-to-end generated-image-to-decoded-trajectory path is operational under this setup. However, the structural diagnostics suggested a mismatch between generated and real delta-displacement image structure:
+
+| Diagnostic | Real | Generated |
+| --- | ---: | ---: |
+| symmetry error | 0.11237 | 0.15929 |
+| R diagonal mean | 0.3150 | 0.0868 |
+| G diagonal mean | 0.5020 | 0.5024 |
+| B diagonal mean | 0.8871 | 0.5042 |
+
+Decoder-level sanity checks also showed that generated trajectories were not yet distributionally aligned with real trajectories:
+
+| Diagnostic | Real | Generated |
+| --- | ---: | ---: |
+| delta magnitude mean | 9.17 | 6.44 |
+| trajectory length mean | 2054.49 | 1442.13 |
+| out-of-range point ratio | n/a | 0.3846 |
+| out-of-range sample ratio | n/a | 0.69 |
+
+This suggests that the 224x224 DDPM pipeline runs end to end, but the generated images do not yet preserve the full delta-displacement image structure needed for reliable decoded-trajectory validity.
+
+The auxiliary-loss audit found that the current notebook-style DDPM loss in `scripts/train_ddpm.py` is representation-specific. The symmetry term only constrains channel 0, corresponding to the R channel. The diagonal term only constrains channel 1, corresponding to the G channel, and uses a fixed normalized mid-gray target. Channel 2, the B channel, is not directly constrained. These assumptions may have been reasonable for a specific notebook image encoding, but they do not necessarily transfer to delta-displacement images where all three channels carry representation-specific structure.
+
+To test this, a controlled MSE-only ablation was run under the same 224x224, 3000-step setup, but with `aux_loss_mode=none`. Outputs were saved under:
+
+```text
+results/ddpm_delta_displacement_224_sanity_mse_only/
+```
+
+This run used pure DDPM noise-prediction MSE, produced a final loss of 0.0138568, and generated 100 final EMA samples. Compared with the notebook-style auxiliary-loss run, MSE-only improved FID/KID and several decoded-trajectory validity diagnostics:
+
+| Metric | Notebook auxiliary loss | MSE-only |
+| --- | ---: | ---: |
+| FID | 197.456 | 137.419 |
+| KID mean | 0.2276 | 0.1199 |
+| Channel mean abs diff | 0.0990 | 0.0602 |
+| Image diversity ratio | 0.7000 | 0.7661 |
+| Pixel variance ratio | 0.8017 | 0.5394 |
+| Generated symmetry error | 0.1593 | 0.2053 |
+| Generated delta magnitude mean | 6.438 | 7.320 |
+| Generated trajectory length mean | 1442.13 | 1639.67 |
+| Out-of-range point ratio | 0.3846 | 0.3204 |
+| Out-of-range sample ratio | 0.69 | 0.57 |
+| Jump ratio > real p95 | 0.000179 | 0.0000897 |
+| Trajectory length variance ratio | 0.1223 | 0.1397 |
+
+These results provide preliminary evidence that, under the current 3000-step sanity setup, MSE-only training is a stronger delta-displacement DDPM baseline than the notebook-style auxiliary loss. This supports the suspicion that the hand-crafted auxiliary losses are tied to earlier image-encoding assumptions and do not transfer cleanly to delta-displacement trajectory images.
+
+The result should still be interpreted cautiously. MSE-only does not establish final generation quality: decoded generated trajectories remain shorter than real trajectories, trajectory-length diversity remains too low, and out-of-range samples remain common. FID/KID are image-level distribution metrics only, while decoder-level diagnostics are distribution and validity checks rather than ADE/FDE because generated images do not have paired ground-truth trajectories. Longer training, stronger structural diagnostics, and controlled comparison against original DDPM checkpoints or generated samples are still needed.
+
 ### Limitations
 
 - The current conclusions apply to the original-style CNN-FC decoder, the ResNet18 decoder, and the present no-speed paired dataset split.
@@ -704,7 +770,10 @@ This remains a controlled representation ablation on real encoded images, not a 
 
 - Inspect worst-case plots and categorize failure modes into localization, endpoint, shape, topology, and possible label/pairing issues.
 - Use the current absolute and delta-displacement decoder results as representation baselines.
+- Use MSE-only as the default delta-displacement DDPM baseline for future DDPM runs unless a better representation-aware auxiliary loss is justified.
+- Consider a longer 10k-step MSE-only 224x224 delta-displacement DDPM run.
+- Evaluate generated images with both structure-level and decoder-level diagnostics, not only FID/KID.
+- Request original DDPM checkpoints and generated samples from previous work where possible to avoid unnecessary retraining.
 - Compare x/y labels with lon/lat labels if coordinate scaling or projection effects remain a concern.
-- Run a generated-image decoding sanity check next.
-- Decode diffusion-generated images using the trained decoder and inspect raw trajectory validity before map matching.
+- Later compare generated-image decoding between absolute x/y and delta-displacement representations.
 - Add map-space metrics only after raw generated-image decoding behavior is understood.

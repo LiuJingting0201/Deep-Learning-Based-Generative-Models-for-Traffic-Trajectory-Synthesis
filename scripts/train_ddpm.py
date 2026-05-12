@@ -43,6 +43,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = DiffusionImageDataset(args.data_dir, image_size=args.image_size)
+    diag_targets = resolve_diag_targets(dataset, args)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -73,7 +74,12 @@ def main() -> None:
         )
 
     model.train()
-    running_loss = 0.0
+    running_components = {
+        "total_loss": 0.0,
+        "mse_loss": 0.0,
+        "symmetry_loss": 0.0,
+        "diag_loss": 0.0,
+    }
     steps_since_log = 0
     batches = cycle(dataloader)
     optimizer.zero_grad(set_to_none=True)
@@ -91,10 +97,20 @@ def main() -> None:
             )
             noisy_images = scheduler.add_noise(clean_images, noise, timesteps)
             noise_pred = model(noisy_images, timesteps, return_dict=False)[0]
-            loss = compute_notebook_loss(noisy_images, noise_pred, noise, timesteps, scheduler)
+            components = compute_loss_components(
+                noisy_images,
+                noise_pred,
+                noise,
+                timesteps,
+                scheduler,
+                args,
+                diag_targets,
+            )
+            loss = components["total_loss"]
             loss = loss / args.gradient_accumulation_steps
             loss.backward()
-            running_loss += float(loss.detach().cpu()) * args.gradient_accumulation_steps
+            for name, value in components.items():
+                running_components[name] += float(value.detach().cpu())
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
         optimizer.step()
@@ -106,11 +122,19 @@ def main() -> None:
         global_step += 1
         steps_since_log += 1
         if global_step % args.log_every == 0 or global_step == 1:
-            avg_loss = running_loss / max(1, steps_since_log)
+            denom = max(1, steps_since_log * args.gradient_accumulation_steps)
+            avg_components = {name: value / denom for name, value in running_components.items()}
+            avg_loss = avg_components["total_loss"]
             elapsed = time.perf_counter() - start_time
             log_record = {
                 "step": global_step,
                 "loss": avg_loss,
+                "total_loss": avg_components["total_loss"],
+                "mse_loss": avg_components["mse_loss"],
+                "symmetry_loss": avg_components["symmetry_loss"],
+                "diag_loss": avg_components["diag_loss"],
+                "aux_loss_mode": args.aux_loss_mode,
+                "diag_targets": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
                 "lr": lr_scheduler.get_last_lr()[0],
                 "elapsed_seconds": elapsed,
                 "steps_per_second": global_step / elapsed if elapsed > 0 else None,
@@ -125,7 +149,7 @@ def main() -> None:
                 f"lr={lr_scheduler.get_last_lr()[0]:.8f} "
                 f"steps_per_second={log_record['steps_per_second']:.4f}"
             )
-            running_loss = 0.0
+            running_components = {name: 0.0 for name in running_components}
             steps_since_log = 0
 
         if args.sample_every > 0 and global_step % args.sample_every == 0:
@@ -136,7 +160,19 @@ def main() -> None:
 
     save_checkpoint(output_dir / "checkpoint-final", model, scheduler, optimizer, lr_scheduler, ema_model, global_step, args)
     (output_dir / "train_summary.json").write_text(
-        json.dumps({"global_step": global_step, "num_images": len(dataset), "image_size": args.image_size}, indent=2)
+        json.dumps(
+            {
+                "global_step": global_step,
+                "num_images": len(dataset),
+                "image_size": args.image_size,
+                "aux_loss_mode": args.aux_loss_mode,
+                "symmetry_weight": args.symmetry_weight,
+                "diag_weight": args.diag_weight,
+                "disable_symmetry_loss": args.disable_symmetry_loss,
+                "diag_targets": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
+            },
+            indent=2,
+        )
     )
 
 
@@ -176,6 +212,77 @@ def build_unet(image_size: int) -> UNet2DModel:
     )
 
 
+def compute_loss_components(
+    noisy_images: torch.Tensor,
+    noise_pred: torch.Tensor,
+    noise: torch.Tensor,
+    timesteps: torch.Tensor,
+    scheduler: DDPMScheduler,
+    args: argparse.Namespace | None = None,
+    diag_targets: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    if args is None:
+        args = argparse.Namespace(
+            aux_loss_mode="notebook",
+            symmetry_weight=0.01,
+            diag_weight=0.01,
+            disable_symmetry_loss=False,
+        )
+    return compute_configurable_loss(noisy_images, noise_pred, noise, timesteps, scheduler, args, diag_targets)
+
+
+def compute_configurable_loss(
+    noisy_images: torch.Tensor,
+    noise_pred: torch.Tensor,
+    noise: torch.Tensor,
+    timesteps: torch.Tensor,
+    scheduler: DDPMScheduler,
+    args: argparse.Namespace,
+    diag_targets: torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    """Compute DDPM MSE plus optional structure losses."""
+    mse_loss = F.mse_loss(noise_pred, noise)
+    zero = mse_loss.new_tensor(0.0)
+    if args.aux_loss_mode == "none":
+        return {"total_loss": mse_loss, "mse_loss": mse_loss, "symmetry_loss": zero, "diag_loss": zero}
+
+    alpha_t = scheduler.alphas_cumprod.to(noisy_images.device)[timesteps].view(-1, 1, 1, 1)
+    sqrt_alpha_t = torch.sqrt(alpha_t)
+    sqrt_one_minus_alpha_t = torch.sqrt(1 - alpha_t)
+    x0_pred = (noisy_images - sqrt_one_minus_alpha_t * noise_pred) / sqrt_alpha_t
+    x0_pred = torch.clamp(x0_pred, -1, 1)
+
+    if args.aux_loss_mode == "notebook":
+        second_channel = x0_pred[:, 1, :, :]
+        diag_values = torch.diagonal(second_channel, dim1=-2, dim2=-1)
+        target = 128 / 127.5 - 1
+        diag_loss = ((diag_values - target) ** 2).mean()
+
+        if args.disable_symmetry_loss:
+            symmetry_loss = zero
+        else:
+            first_channel = x0_pred[:, 0, :, :]
+            symmetry_loss = torch.mean((first_channel - first_channel.transpose(-1, -2)) ** 2)
+        total_loss = mse_loss + args.symmetry_weight * symmetry_loss + args.diag_weight * diag_loss
+        return {
+            "total_loss": total_loss,
+            "mse_loss": mse_loss,
+            "symmetry_loss": symmetry_loss,
+            "diag_loss": diag_loss,
+        }
+
+    if args.aux_loss_mode == "data_driven_diag":
+        if diag_targets is None:
+            raise ValueError("diag_targets must be provided for aux_loss_mode=data_driven_diag")
+        diag_values = torch.diagonal(x0_pred, dim1=-2, dim2=-1)
+        target = diag_targets.to(device=x0_pred.device, dtype=x0_pred.dtype).view(1, 3, 1)
+        diag_loss = ((diag_values - target) ** 2).mean()
+        total_loss = mse_loss + args.diag_weight * diag_loss
+        return {"total_loss": total_loss, "mse_loss": mse_loss, "symmetry_loss": zero, "diag_loss": diag_loss}
+
+    raise ValueError(f"Unsupported aux_loss_mode: {args.aux_loss_mode}")
+
+
 def compute_notebook_loss(
     noisy_images: torch.Tensor,
     noise_pred: torch.Tensor,
@@ -183,22 +290,22 @@ def compute_notebook_loss(
     timesteps: torch.Tensor,
     scheduler: DDPMScheduler,
 ) -> torch.Tensor:
-    """Match the notebook loss: DDPM noise MSE plus GAF structural constraints."""
-    alpha_t = scheduler.alphas_cumprod.to(noisy_images.device)[timesteps].view(-1, 1, 1, 1)
-    sqrt_alpha_t = torch.sqrt(alpha_t)
-    sqrt_one_minus_alpha_t = torch.sqrt(1 - alpha_t)
-    x0_pred = (noisy_images - sqrt_one_minus_alpha_t * noise_pred) / sqrt_alpha_t
-    x0_pred = torch.clamp(x0_pred, -1, 1)
+    """Match the original notebook loss exactly; kept for compatibility."""
+    return compute_loss_components(noisy_images, noise_pred, noise, timesteps, scheduler)["total_loss"]
 
-    second_channel = x0_pred[:, 1, :, :]
-    diag_values = torch.diagonal(second_channel, dim1=-2, dim2=-1)
-    target = 128 / 127.5 - 1
-    diag_loss = ((diag_values - target) ** 2).mean()
 
-    first_channel = x0_pred[:, 0, :, :]
-    symmetry_loss = torch.mean((first_channel - first_channel.transpose(-1, -2)) ** 2)
-    mse_loss = F.mse_loss(noise_pred, noise)
-    return mse_loss + 0.01 * symmetry_loss + 0.01 * diag_loss
+def resolve_diag_targets(dataset: DiffusionImageDataset, args: argparse.Namespace) -> torch.Tensor | None:
+    if args.aux_loss_mode == "notebook":
+        return torch.tensor([128 / 127.5 - 1], dtype=torch.float32)
+    if args.aux_loss_mode != "data_driven_diag":
+        return None
+    channel_sum = torch.zeros(3, dtype=torch.float64)
+    total = 0
+    for image in dataset:
+        diag_values = torch.diagonal(image, dim1=-2, dim2=-1)
+        channel_sum += diag_values.double().sum(dim=1)
+        total += diag_values.shape[1]
+    return (channel_sum / max(1, total)).float()
 
 
 def save_samples(
@@ -306,6 +413,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=1000, help="Save a checkpoint every N optimizer steps.")
     parser.add_argument("--sample-every", type=int, default=1000, help="Generate sample images every N optimizer steps; 0 disables.")
     parser.add_argument("--use-ema", action="store_true", help="Track and save exponential moving average weights.")
+    parser.add_argument(
+        "--aux-loss-mode",
+        choices=("notebook", "none", "data_driven_diag"),
+        default="notebook",
+        help="Auxiliary structure loss mode. Defaults to the original notebook-style loss.",
+    )
+    parser.add_argument("--symmetry-weight", type=float, default=0.01, help="Weight for notebook channel-0 symmetry loss.")
+    parser.add_argument("--diag-weight", type=float, default=0.01, help="Weight for diagonal auxiliary loss.")
+    parser.add_argument(
+        "--disable-symmetry-loss",
+        action="store_true",
+        help="Disable symmetry loss in notebook mode; ignored by none and data_driven_diag modes.",
+    )
     parser.add_argument("--resume-from-checkpoint", type=Path, default=None, help="Checkpoint directory to resume from.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--num-train-timesteps", type=int, default=1000, help="DDPM training diffusion timesteps.")

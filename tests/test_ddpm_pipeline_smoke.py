@@ -98,6 +98,52 @@ def test_train_and_generate_ddpm_one_step_smoke(tmp_path: Path) -> None:
     assert (samples_dir / "sample_000000.png").exists()
 
 
+@pytest.mark.parametrize("aux_loss_mode", ["notebook", "none", "data_driven_diag"])
+def test_train_ddpm_aux_loss_modes_one_step_smoke(tmp_path: Path, aux_loss_mode: str) -> None:
+    data_dir = tmp_path / "real"
+    train_dir = tmp_path / aux_loss_mode
+    write_tiny_images(data_dir, count=3)
+
+    run_script(
+        [
+            "scripts/train_ddpm.py",
+            "--data-dir",
+            str(data_dir),
+            "--output-dir",
+            str(train_dir),
+            "--image-size",
+            "16",
+            "--batch-size",
+            "1",
+            "--lr",
+            "0.0001",
+            "--max-train-steps",
+            "1",
+            "--gradient-accumulation-steps",
+            "1",
+            "--save-every",
+            "0",
+            "--sample-every",
+            "0",
+            "--aux-loss-mode",
+            aux_loss_mode,
+        ]
+    )
+
+    log_record = json.loads((train_dir / "train_log.jsonl").read_text().splitlines()[0])
+    assert log_record["aux_loss_mode"] == aux_loss_mode
+    assert "total_loss" in log_record
+    assert "mse_loss" in log_record
+    assert "symmetry_loss" in log_record
+    assert "diag_loss" in log_record
+    summary = json.loads((train_dir / "train_summary.json").read_text())
+    assert summary["aux_loss_mode"] == aux_loss_mode
+    if aux_loss_mode == "data_driven_diag":
+        assert len(summary["diag_targets"]) == 3
+    elif aux_loss_mode == "none":
+        assert summary["diag_targets"] is None
+
+
 def test_fid_formula_smoke() -> None:
     scipy = pytest.importorskip("scipy")
     assert scipy is not None
