@@ -17,6 +17,7 @@ env/
 # Local data and generated outputs
 data/raw/*
 data/processed/*
+data_no_speed_paired/
 results/*
 !results/.gitkeep
 !results/figures/
@@ -35,6 +36,9 @@ Data_*/
 *.npy
 *.npz
 trajectories_prediction.pkl
+
+# Experiment outputs
+experiments/
 
 # Keep placeholder files
 !data/raw/.gitkeep
