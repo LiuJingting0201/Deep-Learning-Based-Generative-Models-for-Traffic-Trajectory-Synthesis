@@ -242,7 +242,7 @@ Preliminary FID was computed with 100 generated samples. The FID values by check
 checkpoint-1000: 288.81
 checkpoint-2000: 254.43
 checkpoint-3000 / final: 226.14
-```
+
 
 ## 8. What These Validation Results Prove
 
@@ -287,17 +287,8 @@ After that, validate the full generated-image to decoded-trajectory to map-match
 - DDPM training, sample generation, and FID evaluation now run from scripts without relying on unavailable checkpoints.
 - A 3000-step 128x128 GPU sanity baseline completed successfully, and FID decreased from 288.81 to 226.14 across checkpoints.
 - Remaining work includes larger DDPM training, more stable FID, strengthening the image-to-trajectory decoder, and validating generated-image-to-trajectory path-level quality.
+- A ResNet18 decoder ablation improved test ADE from 160.30 to 120.92 compared with the original CNN-FC decoder, suggesting that decoder capacity is one bottleneck, although residual reconstruction errors remain.
 
-## Suggested Git Commit Message
-
-```text
-Refactor notebook DDPM pipeline into reproducible scripts
-
-- Add reusable trajectory encoding, DDPM training, sampling, FID, and reconstruction entry points
-- Add smoke tests for encoding, diffusion, DDPM sampling, FID, and reconstruction helpers
-- Restore notebook-consistent DDPM loss and improve checkpoint/resume logging
-- Document pipeline status, validation results, and remaining decoder/map-matching gaps
-```
 
 ## Do Not Upload to GitHub Checklist
 
@@ -454,6 +445,111 @@ Overall, this should be framed as a controlled decoder validation step before ev
 - The relative-target result uses oracle start and should be treated as an ablation, not as a deployable reconstruction setting.
 - The current diagnostics are based on simple geometric features and qualitative grouping; further inspection of individual failure modes is still needed.
 - Map-space validity and map-matching quality are not evaluated in this decoder experiment.
+
+```
+
+### Stronger Decoder Ablation: ResNet18 No-Speed Decoder
+
+A stronger-decoder ablation was run to distinguish representation limitation from the original CNN-FC decoder limitation.
+
+The experiment used the same paired no-speed dataset and the same fixed split:
+
+```text
+data_no_speed_paired/
+data_no_speed_paired/splits/split_metadata.csv
+```
+
+The dataset was not regenerated and the split was not changed. The experiment did not use speed, map inputs, diffusion, or GANs. It used the same absolute x/y labels as the original decoder experiment, the same train-only mean/std label normalization strategy, and all metrics were evaluated after converting predictions back into the original x/y coordinate space.
+
+The new experiment was saved under:
+
+```text
+experiments/decoder_no_speed_resnet18_ablation/
+```
+
+Model and training configuration:
+
+```text
+model: scratch ResNet18 backbone
+pretrained: false
+head: feature_dim -> 1024 -> 448, reshaped to [224, 2]
+optimizer: Adam
+learning_rate: 1e-4
+batch_size: 8
+epochs: 1000
+early_stopping_patience: 80
+dropout: 0.3
+weight_decay: 0.0
+seed: 42
+scheduler: none
+```
+
+The run completed successfully. The best checkpoint was selected at epoch 712, and early stopping triggered at epoch 792.
+
+Comparison against `experiments/decoder_no_speed_original_config/`:
+
+```text
+Original CNN-FC test mean ADE: 160.3001
+Original CNN-FC test mean FDE: 201.5806
+ResNet18 test mean ADE:        120.9169
+ResNet18 test mean FDE:        186.5896
+ADE change:                    -24.57%
+FDE change:                    -7.44%
+```
+
+Worst-case behavior also improved for ADE:
+
+```text
+Original test ADE p95: 538.3825
+ResNet18 test ADE p95: 423.8822
+Original test ADE max: 1624.0846
+ResNet18 test ADE max: 1562.4547
+```
+
+FDE tail behavior improved at p95 but not at the single worst sample:
+
+```text
+Original test FDE p95: 715.2005
+ResNet18 test FDE p95: 559.6885
+Original test FDE max: 1725.3634
+ResNet18 test FDE max: 1772.3219
+```
+
+Train/validation/test ADE for the ResNet18 model:
+
+```text
+train mean ADE: 34.2425
+val mean ADE:   100.9557
+test mean ADE:  120.9169
+```
+
+Train-test gap comparison:
+
+```text
+Original CNN-FC ADE train-test gap: 99.1354
+ResNet18 ADE train-test gap:        86.6744
+```
+
+The ResNet18 decoder therefore improved test ADE/FDE and reduced the ADE worst-case tail. It also reduced the ADE train-test gap relative to the original CNN-FC decoder, although the absolute train/val/test separation remains substantial. This indicates that the original CNN-FC decoder was a bottleneck. At the same time, the remaining test ADE and the persistent validation/test gap suggest that the no-speed image representation may still limit precise trajectory reconstruction.
+
+
+
+
+Saved artifacts include:
+
+```text
+experiments/decoder_no_speed_resnet18_ablation/evaluation/metrics_summary.json
+experiments/decoder_no_speed_resnet18_ablation/evaluation/per_sample_metrics.csv
+experiments/decoder_no_speed_resnet18_ablation/evaluation/per_timestep_ade.csv
+experiments/decoder_no_speed_resnet18_ablation/evaluation/predictions/
+experiments/decoder_no_speed_resnet18_ablation/evaluation/plots/
+experiments/decoder_no_speed_resnet18_ablation/comparison_with_original/comparison_summary.json
+experiments/decoder_no_speed_resnet18_ablation/comparison_with_original/comparison_table.csv
+experiments/decoder_no_speed_resnet18_ablation/comparison_with_original/test_ADE_distribution_comparison.png
+experiments/decoder_no_speed_resnet18_ablation/comparison_with_original/test_FDE_distribution_comparison.png
+experiments/decoder_no_speed_resnet18_ablation/comparison_with_original/best_median_worst_side_by_side_grid.png
+experiments/decoder_no_speed_resnet18_ablation/resnet18_ablation_report_zh.txt
+```
 
 ### Next Steps
 

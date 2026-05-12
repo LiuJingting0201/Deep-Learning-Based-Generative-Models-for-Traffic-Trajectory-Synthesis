@@ -15,6 +15,9 @@ env/
 .ipynb_checkpoints/
 
 # Local data and generated outputs
+Diffusion_Models/
+Image_Generation/
+Map_Matching/
 data/raw/*
 data/processed/*
 data_no_speed_paired/
