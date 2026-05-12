@@ -242,7 +242,7 @@ Preliminary FID was computed with 100 generated samples. The FID values by check
 checkpoint-1000: 288.81
 checkpoint-2000: 254.43
 checkpoint-3000 / final: 226.14
-
+```
 
 ## 8. What These Validation Results Prove
 
@@ -288,7 +288,13 @@ After that, validate the full generated-image to decoded-trajectory to map-match
 - A 3000-step 128x128 GPU sanity baseline completed successfully, and FID decreased from 288.81 to 226.14 across checkpoints.
 - Remaining work includes larger DDPM training, more stable FID, strengthening the image-to-trajectory decoder, and validating generated-image-to-trajectory path-level quality.
 - A ResNet18 decoder ablation improved test ADE from 160.30 to 120.92 compared with the original CNN-FC decoder, suggesting that decoder capacity is one bottleneck, although residual reconstruction errors remain.
+- A delta-displacement representation ablation shows a trade-off: raw integrated ADE/FDE is worse than absolute x/y, but aligned-shape metrics improve substantially, suggesting better local shape encoding with accumulated drift in absolute reconstruction.
 
+## Suggested Git Commit Message
+
+```text
+Add delta-displacement decoder ablation
+```
 
 ## Do Not Upload to GitHub Checklist
 
@@ -437,17 +443,6 @@ The error analysis further suggests that the worst cases are not simply a functi
 
 Overall, this should be framed as a controlled decoder validation step before evaluating diffusion-generated images. Before using the trained decoder as the main judge of generated-image quality, decoder reliability should be further validated or strengthened.
 
-### Limitations
-
-- The current conclusions apply to the original-style CNN-FC decoder and the present no-speed paired dataset split.
-- The results do not yet establish robust reconstruction for diffusion-generated images.
-- Performance on real encoded images is a controlled baseline and should not be treated as a guarantee for diffusion-generated images, which may contain artifacts or structural inconsistencies outside the real-image decoder training distribution.
-- The relative-target result uses oracle start and should be treated as an ablation, not as a deployable reconstruction setting.
-- The current diagnostics are based on simple geometric features and qualitative grouping; further inspection of individual failure modes is still needed.
-- Map-space validity and map-matching quality are not evaluated in this decoder experiment.
-
-```
-
 ### Stronger Decoder Ablation: ResNet18 No-Speed Decoder
 
 A stronger-decoder ablation was run to distinguish representation limitation from the original CNN-FC decoder limitation.
@@ -530,7 +525,7 @@ Original CNN-FC ADE train-test gap: 99.1354
 ResNet18 ADE train-test gap:        86.6744
 ```
 
-The ResNet18 decoder therefore improved test ADE/FDE and reduced the ADE worst-case tail. It also reduced the ADE train-test gap relative to the original CNN-FC decoder, although the absolute train/val/test separation remains substantial. This indicates that the original CNN-FC decoder was a bottleneck. At the same time, the remaining test ADE and the persistent validation/test gap suggest that the no-speed image representation may still limit precise trajectory reconstruction.
+The ResNet18 decoder therefore improved test ADE/FDE and reduced the ADE worst-case tail. It also reduced the ADE train-test gap relative to the original CNN-FC decoder, although the absolute train/val/test separation remains substantial. This suggests that the original CNN-FC decoder was a meaningful bottleneck, especially for average displacement reconstruction. At the same time, the remaining test ADE and the persistent validation/test gap suggest that the no-speed image representation may still limit precise trajectory reconstruction.
 
 
 
@@ -551,10 +546,165 @@ experiments/decoder_no_speed_resnet18_ablation/comparison_with_original/best_med
 experiments/decoder_no_speed_resnet18_ablation/resnet18_ablation_report_zh.txt
 ```
 
+### Delta-Displacement Representation Ablation
+
+This ablation tests whether a local-motion representation improves trajectory-image decodability. The previous absolute x/y representation encodes both global position and route shape in the same coordinate sequence. The delta-displacement representation instead encodes local increments:
+
+```text
+delta_xy[0] = [0, 0]
+delta_xy[t] = xy[t] - xy[t-1], for t = 1...223
+```
+
+The research question is not whether this representation is universally better, but whether local displacement encoding changes the invertibility behavior of Hilbert/GAF/MTF trajectory images under a controlled decoder.
+
+Dataset construction used the raw GPS file:
+
+```text
+/home/irisliu/Thesis/Image_Generation/Image_Generation/gps_with_speed_224_UPDATED.xls
+```
+
+The raw file contained 3159 vehicle trajectories, and each vehicle had exactly 224 points. Speed was not used. The generated dataset was saved under:
+
+```text
+data_no_speed_delta_displacement_paired/
+```
+
+The dataset contains:
+
+```text
+images/
+labels_delta_displacement/
+labels_absolute/
+starts/
+metadata.csv
+encoding_normalization.json
+sanity_checks/
+```
+
+Each sample stores the delta-displacement label, the original absolute x/y label, and the true start point. Integrating the saved delta sequence with the true start reconstructs the saved absolute trajectory before model training, with maximum sanity-check reconstruction error around `1e-12`. The train/validation/test assignment preserves the same sample-level split as `data_no_speed_paired/`.
+
+Delta dataset diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| delta_x global min | -34.42 |
+| delta_x global max | 34.39 |
+| delta_y global min | -35.88 |
+| delta_y global max | 33.97 |
+| both axes exactly zero ratio | 0.2145 |
+| delta magnitude mean | 9.17 |
+| delta magnitude median | 8.19 |
+| delta magnitude p95 | 24.65 |
+| delta magnitude max | 36.02 |
+| normalized saturation near 0/1 | negligible |
+
+Dataset-level min/max normalization to `[0, 1]` was used only for image construction before Hilbert/GAF/MTF encoding. The physical delta labels remained unnormalized on disk and were later normalized using train-only label scaling for decoder training. The dataset appears safe to train from a normalization/saturation perspective, but the approximately 21.5% exact stationary-motion mode should be monitored because it is a meaningful part of the target distribution.
+
+The delta-displacement ResNet18 decoder was trained with:
+
+```text
+model: scratch ResNet18 backbone
+input: delta-displacement Hilbert/GAF/MTF RGB image
+target: delta_displacement_xy, shape [224, 2]
+optimizer: Adam
+learning_rate: 1e-4
+batch_size: 8
+epochs: 1000
+early_stopping_patience: 80
+dropout: 0.3
+weight_decay: 0.0
+seed: 42
+scheduler: none
+label_normalization: train-only mean/std over delta labels
+loss: MSE in normalized delta-displacement space
+```
+
+The best checkpoint was selected at epoch 285. Training stopped at epoch 365 after early stopping. Evaluation was performed in two spaces: delta-displacement space and integrated absolute trajectory space using the true start point.
+
+Raw absolute reconstruction comparison on the test split:
+
+| Model / representation | Test ADE | Test FDE |
+| --- | ---: | ---: |
+| Absolute x/y ResNet18 | 120.92 | 186.59 |
+| Delta-displacement integrated | 135.29 | 224.34 |
+
+The delta-displacement integrated reconstruction is worse by approximately 11.89% in raw test ADE and 20.23% in raw test FDE. Therefore, under the current ResNet18 decoder, delta-displacement is not a clean win for raw absolute trajectory reconstruction.
+
+Delta-space test metrics:
+
+| Metric | Value |
+| --- | ---: |
+| delta ADE | 3.8768 |
+| delta FDE | 6.4908 |
+| delta RMSE | 3.3114 |
+| delta MAE | 2.4357 |
+
+Long-tail behavior is more mixed:
+
+| Tail metric | Absolute x/y ResNet18 | Delta integrated |
+| --- | ---: | ---: |
+| ADE max | 1562.45 | 454.62 |
+| FDE max | 1772.32 | 854.54 |
+
+The delta-displacement representation worsens mean raw integrated ADE/FDE, but it appears to reduce the most extreme catastrophic errors. One cautious interpretation is that true-start integration prevents full spatial relocation failures in some cases, while accumulated local displacement errors still produce drift and endpoint degradation on average.
+
+Distribution diagnostics:
+
+| Diagnostic | Value |
+| --- | ---: |
+| predicted near-zero delta ratio | 0.0000 |
+| ground-truth near-zero delta ratio | 0.2010 |
+| predicted / ground-truth trajectory length ratio | 0.9487 |
+| delta predicted / ground-truth variance ratio | 0.7516 |
+
+The decoder does not reproduce the stationary or zero-displacement mode well. It also slightly underestimates trajectory length and produces lower-variance delta predictions. These effects may contribute to integration drift and higher endpoint error after converting predicted deltas back to absolute trajectories.
+
+Alignment diagnostics were saved under:
+
+```text
+experiments/decoder_no_speed_delta_displacement_resnet18_ablation/comparison_with_absolute_resnet18/alignment_diagnostics/
+```
+
+Test-set alignment comparison:
+
+| Metric | Absolute ResNet18 | Delta integrated | Change |
+| --- | ---: | ---: | ---: |
+| raw ADE | 120.92 | 135.29 | +11.89% |
+| raw FDE | 186.59 | 224.34 | +20.23% |
+| start-aligned ADE | 180.44 | 135.29 | -25.02% |
+| start-aligned FDE | 265.62 | 224.34 | -15.54% |
+| centroid-aligned ADE | 86.60 | 72.64 | -16.13% |
+| centroid-aligned FDE | 161.82 | 127.67 | -21.10% |
+| scale-normalized shape ADE | 80.90 | 55.15 | -31.84% |
+| scale-normalized shape FDE | 152.84 | 98.43 | -35.60% |
+
+For the delta-displacement model, raw and start-aligned values are identical because integrated trajectories are reconstructed with the true start point.
+
+Although raw integrated delta-displacement reconstruction is worse, after removing translation and scale effects the delta-displacement representation gives better aligned-shape metrics than the absolute x/y representation. This supports the qualitative interpretation that delta-displacement captures local route geometry and trajectory shape better, while accumulated drift and global placement error hurt raw ADE/FDE.
+
+The result should not be interpreted as simply showing that one representation is strictly better. Under the current ResNet18 decoder:
+
+- absolute x/y is better for raw absolute trajectory reconstruction;
+- delta-displacement better preserves local trajectory shape after alignment;
+- delta-displacement reduces extreme tail failures but introduces integration drift and endpoint degradation;
+- the two representations emphasize different aspects of trajectory information.
+
+This remains a controlled representation ablation on real encoded images, not a final diffusion-generation result. A possible later direction is a hybrid representation that combines absolute placement with local delta-displacement dynamics, but that is not required for the current first-stage validation.
+
+### Limitations
+
+- The current conclusions apply to the original-style CNN-FC decoder, the ResNet18 decoder, and the present no-speed paired dataset split.
+- The results do not yet establish robust reconstruction for diffusion-generated images.
+- Performance on real encoded images is a controlled baseline and should not be treated as a guarantee for diffusion-generated images, which may contain artifacts or structural inconsistencies outside the real-image decoder training distribution.
+- The relative-target and delta-displacement oracle-start results should be treated as ablations, not as deployable reconstruction settings.
+- The current diagnostics are based on simple geometric features, alignment diagnostics, and qualitative grouping; further inspection of individual failure modes is still needed.
+- Map-space validity and map-matching quality are not evaluated in these decoder experiments.
+
 ### Next Steps
 
 - Inspect worst-case plots and categorize failure modes into localization, endpoint, shape, topology, and possible label/pairing issues.
-- Compare the same dataset and split with a stronger decoder, such as a ResNet18-style backbone or a more spatial CNN architecture.
+- Use the current absolute and delta-displacement decoder results as representation baselines.
 - Compare x/y labels with lon/lat labels if coordinate scaling or projection effects remain a concern.
-- Evaluate diffusion-generated images through a trained decoder only after decoder reliability is better understood.
-- Add map-space metrics after the image-to-trajectory reconstruction baseline is stable.
+- Run a generated-image decoding sanity check next.
+- Decode diffusion-generated images using the trained decoder and inspect raw trajectory validity before map matching.
+- Add map-space metrics only after raw generated-image decoding behavior is understood.
