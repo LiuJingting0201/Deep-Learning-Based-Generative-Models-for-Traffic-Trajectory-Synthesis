@@ -144,6 +144,60 @@ def test_train_ddpm_aux_loss_modes_one_step_smoke(tmp_path: Path, aux_loss_mode:
         assert summary["diag_targets"] is None
 
 
+def test_train_ddpm_data_driven_diag_uses_split_metadata(tmp_path: Path) -> None:
+    data_root = tmp_path / "paired"
+    data_dir = data_root / "images"
+    split_dir = data_root / "splits"
+    train_dir = tmp_path / "data_driven_split"
+    write_tiny_images(data_dir, count=4)
+    split_dir.mkdir(parents=True)
+    (split_dir / "split_metadata.csv").write_text(
+        "\n".join(
+            [
+                "sample_id,image_path,split",
+                "sample_000000,images/image_0.png,train",
+                "sample_000001,images/image_1.png,train",
+                "sample_000002,images/image_2.png,val",
+                "sample_000003,images/image_3.png,test",
+            ]
+        )
+        + "\n"
+    )
+
+    run_script(
+        [
+            "scripts/train_ddpm.py",
+            "--data-dir",
+            str(data_dir),
+            "--output-dir",
+            str(train_dir),
+            "--image-size",
+            "16",
+            "--batch-size",
+            "1",
+            "--lr",
+            "0.0001",
+            "--max-train-steps",
+            "1",
+            "--gradient-accumulation-steps",
+            "1",
+            "--save-every",
+            "0",
+            "--sample-every",
+            "0",
+            "--aux-loss-mode",
+            "data_driven_diag",
+            "--split-metadata",
+            str(split_dir / "split_metadata.csv"),
+        ]
+    )
+
+    summary = json.loads((train_dir / "train_summary.json").read_text())
+    assert summary["diag_target_source"] == "train_split_metadata"
+    assert summary["diag_target_num_images"] == 2
+    assert len(summary["diag_target_rgb"]) == 3
+
+
 def test_fid_formula_smoke() -> None:
     scipy = pytest.importorskip("scipy")
     assert scipy is not None

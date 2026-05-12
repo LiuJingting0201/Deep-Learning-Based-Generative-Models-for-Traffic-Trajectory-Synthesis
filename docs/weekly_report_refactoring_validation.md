@@ -290,6 +290,7 @@ After that, validate the full generated-image to decoded-trajectory to map-match
 - A ResNet18 decoder ablation improved test ADE from 160.30 to 120.92 compared with the original CNN-FC decoder, suggesting that decoder capacity is one bottleneck, although residual reconstruction errors remain.
 - A delta-displacement representation ablation shows a trade-off: raw integrated ADE/FDE is worse than absolute x/y, but aligned-shape metrics improve substantially, suggesting better local shape encoding with accumulated drift in absolute reconstruction.
 - A 224x224 delta-displacement DDPM sanity run was completed. MSE-only training outperformed the notebook-style auxiliary loss on FID/KID and decoded-trajectory validity, suggesting that the original auxiliary losses are representation-specific and less suitable for delta-displacement images.
+- A data-driven diagonal-loss DDPM ablation slightly improved FID/KID and B-channel structure over MSE-only, but did not consistently improve all decoder-level validity metrics; MSE-only remains the cleaner default baseline, while data-driven diagonal loss is a promising structural ablation.
 
 ## Suggested Git Commit Message
 
@@ -757,10 +758,76 @@ These results provide preliminary evidence that, under the current 3000-step san
 
 The result should still be interpreted cautiously. MSE-only does not establish final generation quality: decoded generated trajectories remain shorter than real trajectories, trajectory-length diversity remains too low, and out-of-range samples remain common. FID/KID are image-level distribution metrics only, while decoder-level diagnostics are distribution and validity checks rather than ADE/FDE because generated images do not have paired ground-truth trajectories. Longer training, stronger structural diagnostics, and controlled comparison against original DDPM checkpoints or generated samples are still needed.
 
+Visual inspection is consistent with the quantitative diagnostics: MSE-only samples show a more balanced RGB distribution and less blue/green dominance than the notebook-auxiliary-loss samples. This further supports that the notebook-style auxiliary losses may impose representation-specific channel biases that do not transfer well to delta-displacement images. However, the decoded trajectory metrics still indicate that the MSE-only model is not yet a final-quality generator.
+
+#### Data-Driven Diagonal-Loss Ablation
+
+After the notebook-style auxiliary loss appeared unsuitable for delta-displacement images and MSE-only became the stronger baseline, a data-driven diagonal loss was tested as a small structural regularizer. The goal was to make the diagonal constraint representation-aware, rather than relying on the old fixed channel assumptions from the notebook.
+
+`scripts/train_ddpm.py` was extended to support train-split diagonal target computation through `--split-metadata`, and the smoke tests were updated to cover the split-metadata path. The mode used for this run was:
+
+```text
+aux_loss_mode=data_driven_diag
+```
+
+The loss was:
+
+```text
+standard DDPM noise-prediction MSE + diag_weight * data_driven_diag_loss
+```
+
+with `diag_weight=0.01` and `symmetry_weight=0.0`. The RGB diagonal targets were computed from 2527 train images using the same DDPM image normalization convention as training. In normalized `[-1, 1]` space, the target was:
+
+```text
+[-0.3690, 0.0039, 0.7750]
+```
+
+The data-driven diagonal run used the same 224x224, 3000-step configuration as the MSE-only run and saved outputs under:
+
+```text
+results/ddpm_delta_displacement_224_data_driven_diag_3k/
+```
+
+The run completed successfully, generated 100 valid RGB 224x224 final EMA samples, and produced:
+
+| Diagnostic | Value |
+| --- | ---: |
+| final loss | 0.01529 |
+| final MSE component | 0.01415 |
+| final diagonal-loss component | 0.11389 |
+| FID | 134.96 |
+| KID mean | 0.1167 |
+| KID std | 0.0051 |
+
+Three 3000-step delta-displacement DDPM runs now compare as follows:
+
+| Metric | Notebook aux | MSE-only | Data-driven diag |
+| --- | ---: | ---: | ---: |
+| FID | 197.456 | 137.419 | 134.957 |
+| KID mean | 0.2276 | 0.1199 | 0.1167 |
+| Channel mean abs diff | 0.0990 | 0.0602 | 0.0621 |
+| Image diversity ratio | 0.7000 | 0.7661 | 0.7558 |
+| Pixel variance ratio | 0.8017 | 0.5394 | 0.5389 |
+| Generated symmetry error | 0.1593 | 0.2053 | 0.1971 |
+| B diagonal mean | 0.5042 | 0.4688 | 0.7379 |
+| Generated delta magnitude mean | 6.438 | 7.320 | 7.498 |
+| Generated trajectory length mean | 1442.13 | 1639.67 | 1679.43 |
+| Out-of-range point ratio | 0.3846 | 0.3204 | 0.3166 |
+| Out-of-range sample ratio | 0.69 | 0.57 | 0.61 |
+| Jump ratio > real p95 | 0.000179 | 0.0000897 | 0.0 |
+| Trajectory length variance ratio | 0.1223 | 0.1397 | 0.1460 |
+
+The data-driven diagonal loss is mildly promising, but it is not a clean win over MSE-only. It slightly improves FID/KID, substantially improves the B-channel diagonal statistic, increases decoded trajectory length toward the real trajectory distribution, slightly reduces the out-of-range point ratio, and removes generated jumps above the real p95 step-size threshold in this sample. However, it also slightly worsens channel mean difference and image diversity relative to MSE-only, and the out-of-range sample ratio increases from 0.57 to 0.61.
+
+Therefore, MSE-only should remain the default delta-displacement DDPM baseline for now. The data-driven diagonal loss should be treated as a promising structural ablation worth revisiting after stronger MSE-only baselines or longer controlled runs, rather than as the default training objective.
+
+
 ### Limitations
 
 - The current conclusions apply to the original-style CNN-FC decoder, the ResNet18 decoder, and the present no-speed paired dataset split.
 - The results do not yet establish robust reconstruction for diffusion-generated images.
+- The DDPM loss comparisons are 3000-step sanity ablations, not final model-quality experiments.
+- Decoder-level generated-trajectory metrics are distribution and validity diagnostics, not ADE/FDE, because generated images have no paired ground-truth trajectories.
 - Performance on real encoded images is a controlled baseline and should not be treated as a guarantee for diffusion-generated images, which may contain artifacts or structural inconsistencies outside the real-image decoder training distribution.
 - The relative-target and delta-displacement oracle-start results should be treated as ablations, not as deployable reconstruction settings.
 - The current diagnostics are based on simple geometric features, alignment diagnostics, and qualitative grouping; further inspection of individual failure modes is still needed.
@@ -770,10 +837,12 @@ The result should still be interpreted cautiously. MSE-only does not establish f
 
 - Inspect worst-case plots and categorize failure modes into localization, endpoint, shape, topology, and possible label/pairing issues.
 - Use the current absolute and delta-displacement decoder results as representation baselines.
-- Use MSE-only as the default delta-displacement DDPM baseline for future DDPM runs unless a better representation-aware auxiliary loss is justified.
-- Consider a longer 10k-step MSE-only 224x224 delta-displacement DDPM run.
+- Keep MSE-only as the default delta-displacement DDPM baseline for future DDPM runs.
+- Keep data-driven diagonal loss as a structural ablation candidate, not the default baseline.
+- If time permits, compare MSE-only and data-driven diagonal loss under a longer controlled run, but avoid over-expanding loss tuning before the baseline is stable.
 - Evaluate generated images with both structure-level and decoder-level diagnostics, not only FID/KID.
 - Request original DDPM checkpoints and generated samples from previous work where possible to avoid unnecessary retraining.
+- Inspect map/network resources in `Map_Matching/` to determine whether road-mask or topology-conditioned diffusion is feasible.
 - Compare x/y labels with lon/lat labels if coordinate scaling or projection effects remain a concern.
 - Later compare generated-image decoding between absolute x/y and delta-displacement representations.
 - Add map-space metrics only after raw generated-image decoding behavior is understood.

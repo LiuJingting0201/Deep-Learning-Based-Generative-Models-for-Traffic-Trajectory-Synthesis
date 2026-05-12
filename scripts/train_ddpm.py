@@ -8,6 +8,7 @@ resume from a checkpoint directory created by this script.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 import sys
@@ -43,7 +44,8 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = DiffusionImageDataset(args.data_dir, image_size=args.image_size)
-    diag_targets = resolve_diag_targets(dataset, args)
+    diag_target_info = resolve_diag_targets(dataset, args)
+    diag_targets = diag_target_info["targets"]
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -135,6 +137,9 @@ def main() -> None:
                 "diag_loss": avg_components["diag_loss"],
                 "aux_loss_mode": args.aux_loss_mode,
                 "diag_targets": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
+                "diag_target_rgb": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
+                "diag_weight": args.diag_weight,
+                "symmetry_weight": args.symmetry_weight,
                 "lr": lr_scheduler.get_last_lr()[0],
                 "elapsed_seconds": elapsed,
                 "steps_per_second": global_step / elapsed if elapsed > 0 else None,
@@ -170,6 +175,10 @@ def main() -> None:
                 "diag_weight": args.diag_weight,
                 "disable_symmetry_loss": args.disable_symmetry_loss,
                 "diag_targets": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
+                "diag_target_rgb": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
+                "diag_target_source": diag_target_info["source"],
+                "diag_target_num_images": diag_target_info["num_images"],
+                "split_metadata": str(args.split_metadata) if args.split_metadata is not None else None,
             },
             indent=2,
         )
@@ -294,18 +303,61 @@ def compute_notebook_loss(
     return compute_loss_components(noisy_images, noise_pred, noise, timesteps, scheduler)["total_loss"]
 
 
-def resolve_diag_targets(dataset: DiffusionImageDataset, args: argparse.Namespace) -> torch.Tensor | None:
+def resolve_diag_targets(dataset: DiffusionImageDataset, args: argparse.Namespace) -> dict[str, object]:
     if args.aux_loss_mode == "notebook":
-        return torch.tensor([128 / 127.5 - 1], dtype=torch.float32)
+        return {
+            "targets": torch.tensor([128 / 127.5 - 1], dtype=torch.float32),
+            "source": "notebook_fixed_channel1_mid_gray",
+            "num_images": None,
+        }
     if args.aux_loss_mode != "data_driven_diag":
-        return None
+        return {"targets": None, "source": None, "num_images": None}
+
+    target_paths = resolve_diag_target_paths(dataset, args)
+    if not target_paths:
+        raise ValueError("No images available for data-driven diagonal target computation")
+
     channel_sum = torch.zeros(3, dtype=torch.float64)
     total = 0
-    for image in dataset:
+    path_to_index = {path.resolve(): index for index, path in enumerate(dataset.paths)}
+    for path in target_paths:
+        image = dataset[path_to_index[path.resolve()]]
         diag_values = torch.diagonal(image, dim1=-2, dim2=-1)
         channel_sum += diag_values.double().sum(dim=1)
         total += diag_values.shape[1]
-    return (channel_sum / max(1, total)).float()
+    source = "train_split_metadata" if args.split_metadata is not None else "all_images_no_split_metadata"
+    return {"targets": (channel_sum / max(1, total)).float(), "source": source, "num_images": len(target_paths)}
+
+
+def resolve_diag_target_paths(dataset: DiffusionImageDataset, args: argparse.Namespace) -> list[Path]:
+    if args.split_metadata is None:
+        return list(dataset.paths)
+
+    split_metadata = args.split_metadata.resolve()
+    if not split_metadata.exists():
+        raise FileNotFoundError(f"Split metadata does not exist: {split_metadata}")
+
+    data_root = split_metadata.parent.parent
+    dataset_paths = {path.resolve() for path in dataset.paths}
+    train_paths: list[Path] = []
+    with split_metadata.open(newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        required_columns = {"split", "image_path"}
+        missing_columns = required_columns.difference(reader.fieldnames or [])
+        if missing_columns:
+            raise ValueError(f"Split metadata is missing required columns: {sorted(missing_columns)}")
+        for row in reader:
+            if row["split"] != "train":
+                continue
+            image_path = (data_root / row["image_path"]).resolve()
+            if image_path in dataset_paths:
+                train_paths.append(image_path)
+
+    if not train_paths:
+        raise ValueError(
+            f"No train images from {split_metadata} matched the DDPM data directory {dataset.image_dir}"
+        )
+    return train_paths
 
 
 def save_samples(
@@ -418,6 +470,12 @@ def parse_args() -> argparse.Namespace:
         choices=("notebook", "none", "data_driven_diag"),
         default="notebook",
         help="Auxiliary structure loss mode. Defaults to the original notebook-style loss.",
+    )
+    parser.add_argument(
+        "--split-metadata",
+        type=Path,
+        default=None,
+        help="Optional split_metadata.csv used to compute data-driven diagonal targets from train images only.",
     )
     parser.add_argument("--symmetry-weight", type=float, default=0.01, help="Weight for notebook channel-0 symmetry loss.")
     parser.add_argument("--diag-weight", type=float, default=0.01, help="Weight for diagonal auxiliary loss.")
