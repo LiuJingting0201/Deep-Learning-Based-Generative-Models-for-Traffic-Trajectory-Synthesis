@@ -2,6 +2,10 @@
 
 Use BeeGFS scratch for training data and training outputs. Do not use `$SCRATCH_FLASH` while it is unavailable.
 
+module load miniconda3/3.13.25
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate thesis-diffusion
+
 ## Paths
 
 - Put DDPM image data under `$SCRATCH/Thesis_data`.

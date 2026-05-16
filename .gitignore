@@ -62,3 +62,10 @@ checkpoints/
 *.pth
 *.ckpt
 *.safetensors
+logs/
+logs/slurm/
+results_hpc/
+data_latent_delta_224/
+data_latent_delta_224_latent28/
+*.out
+*.err
