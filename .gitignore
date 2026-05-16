@@ -21,6 +21,8 @@ Map_Matching/
 data/raw/*
 data/processed/*
 data_no_speed_paired/
+data_no_speed_delta_displacement_paired/
+cache/
 results/*
 !results/.gitkeep
 !results/figures/
@@ -42,6 +44,10 @@ trajectories_prediction.pkl
 
 # Experiment outputs
 experiments/
+results_hpc/
+logs/
+*.out
+*.err
 
 # Keep placeholder files
 !data/raw/.gitkeep
