@@ -1,0 +1,24 @@
+===== Job info =====
+compute-6-11.cluster.lan
+Fri May 15 08:30:27 PM UTC 2026
+HOME=/home/jliu
+SCRATCH=/mnt/beegfs-compat/jliu
+PWD=/home/jliu/Thesis
+===== Python check =====
+/share/apps/miniconda3/bin/python
+PYTHON=/home/jliu/.conda/envs/thesis-diffusion/bin/python
+/home/jliu/.conda/envs/thesis-diffusion/bin/python
+2.12.0+cu126
+True
+NVIDIA A40
+===== Data check =====
+sample_000000.png
+sample_000001.png
+sample_000002.png
+sample_000003.png
+sample_000004.png
+sample_000005.png
+sample_000006.png
+sample_000007.png
+sample_000008.png
+sample_000009.png

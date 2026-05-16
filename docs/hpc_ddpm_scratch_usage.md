@@ -21,6 +21,24 @@ cd $HOME/Thesis
 sbatch scripts/slurm/train_ddpm_scratch_10step.slurm
 ```
 
+## Submit 20k-step DDPM run
+
+```bash
+cd $HOME/Thesis
+sbatch scripts/slurm/train_ddpm_scratch_20000step.slurm
+squeue -u jliu
+tail -f logs/ddpm_scratch_20000step_*.out
+```
+
+## Data-driven diagonal loss with precomputed targets
+
+```bash
+cd $HOME/Thesis
+sbatch scripts/slurm/precompute_diag_targets_delta_displacement.slurm
+sbatch scripts/slurm/train_ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed.slurm
+tail -f logs/ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed_*.out
+```
+
 ## Check the queue
 
 ```bash

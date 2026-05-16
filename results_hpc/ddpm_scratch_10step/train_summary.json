@@ -1,0 +1,21 @@
+{
+  "global_step": 10,
+  "num_images": 3159,
+  "image_size": 224,
+  "aux_loss_mode": "notebook",
+  "symmetry_weight": 0.01,
+  "diag_weight": 0.01,
+  "disable_symmetry_loss": false,
+  "diag_targets": [
+    0.003921568859368563
+  ],
+  "diag_target_rgb": [
+    0.003921568859368563
+  ],
+  "diag_target_source": "notebook_fixed_channel1_mid_gray",
+  "diag_target_num_images": null,
+  "split_metadata": null,
+  "scratch_root": "/mnt/beegfs-compat/jliu",
+  "run_name": "ddpm_scratch_10step",
+  "output_dir": "/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10step"
+}

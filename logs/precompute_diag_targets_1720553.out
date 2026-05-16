@@ -1,0 +1,18 @@
+===== Job info =====
+compute-7-3.cluster.lan
+Fri May 15 11:51:32 PM UTC 2026
+HOME=/home/jliu
+SCRATCH=/mnt/beegfs-compat/jliu
+PWD=/home/jliu/Thesis
+===== Python check =====
+/home/jliu/.conda/envs/thesis-diffusion/bin/python
+PYTHON=/home/jliu/.conda/envs/thesis-diffusion/bin/python
+/home/jliu/.conda/envs/thesis-diffusion/bin/python
+===== Precompute diag targets =====
+data_dir: /mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images
+split_metadata: /mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/splits/split_metadata.csv
+output_file: /mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/diagnostics/diag_targets_train_split.json
+number_of_train_images_used: 2527
+diag_targets: [-0.3689744770526886, 0.003921627998352051, 0.7749511003494263]
+===== Finished =====
+Sat May 16 12:15:04 AM UTC 2026

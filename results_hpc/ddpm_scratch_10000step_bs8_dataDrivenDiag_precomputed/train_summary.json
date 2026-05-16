@@ -1,0 +1,26 @@
+{
+  "global_step": 10000,
+  "num_images": 3159,
+  "image_size": 224,
+  "aux_loss_mode": "data_driven_diag",
+  "symmetry_weight": 0.01,
+  "diag_weight": 0.01,
+  "disable_symmetry_loss": false,
+  "diag_targets": [
+    -0.3689744770526886,
+    0.003921627998352051,
+    0.7749511003494263
+  ],
+  "diag_target_rgb": [
+    -0.3689744770526886,
+    0.003921627998352051,
+    0.7749511003494263
+  ],
+  "diag_target_source": "train_split_metadata_precomputed",
+  "diag_target_num_images": 2527,
+  "diag_target_file": "/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/diagnostics/diag_targets_train_split.json",
+  "split_metadata": "/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/splits/split_metadata.csv",
+  "scratch_root": "/mnt/beegfs-compat/jliu",
+  "run_name": "ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed",
+  "output_dir": "/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed"
+}

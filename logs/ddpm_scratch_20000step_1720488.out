@@ -1,0 +1,65 @@
+===== Job info =====
+compute-4-11.cluster.lan
+Fri May 15 08:44:04 PM UTC 2026
+HOME=/home/jliu
+SCRATCH=/mnt/beegfs-compat/jliu
+PWD=/home/jliu/Thesis
+===== Python check =====
+/share/apps/miniconda3/bin/python
+PYTHON=/home/jliu/.conda/envs/thesis-diffusion/bin/python
+/home/jliu/.conda/envs/thesis-diffusion/bin/python
+2.12.0+cu126
+True
+NVIDIA A40
+===== Data check =====
+DATA_DIR=/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_000922.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_001602.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_001616.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_002471.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_001080.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_002487.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_002149.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_001327.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_000353.png
+/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images/sample_000326.png
+Number of images:
+3159
+===== Start training =====
+DDPM scratch training startup diagnostics
+hostname: compute-4-11.cluster.lan
+cwd: /home/jliu/Thesis
+torch_version: 2.12.0+cu126
+torch.cuda.is_available(): True
+gpu_name: NVIDIA A40
+cuda_device_count: 1
+resolved_data_dir: /mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/images
+resolved_output_dir: /mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_20000step
+num_input_images: 3159
+training_hyperparameters:
+  image_size: 224
+  batch_size: 2
+  lr: 0.0001
+  max_train_steps: 20000
+  gradient_accumulation_steps: 2
+  save_every: 1000
+  sample_every: 2000
+  use_ema: False
+  aux_loss_mode: notebook
+  symmetry_weight: 0.01
+  diag_weight: 0.01
+  disable_symmetry_loss: False
+  resume_from_checkpoint: None
+  seed: 42
+  num_train_timesteps: 1000
+  lr_warmup_steps: 500
+  max_grad_norm: 1.0
+  num_workers: 0
+  log_every: 10
+  num_sample_images: 4
+  sample_inference_steps: 20
+  run_name: ddpm_scratch_20000step
+  scratch_root: /mnt/beegfs-compat/jliu
+  copy_results_to_home: True
+  home_results_dir: None
+

@@ -61,7 +61,7 @@ def main() -> None:
     device = torch.device("cuda")
 
     dataset = DiffusionImageDataset(args.data_dir, image_size=args.image_size)
-    diag_target_info = resolve_diag_targets(dataset, args)
+    diag_target_info = resolve_diag_targets_for_scratch(dataset, args)
     diag_targets = diag_target_info["targets"]
     print_startup_diagnostics(args, dataset)
 
@@ -207,6 +207,7 @@ def main() -> None:
                 "diag_target_rgb": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
                 "diag_target_source": diag_target_info["source"],
                 "diag_target_num_images": diag_target_info["num_images"],
+                "diag_target_file": str(args.diag_target_file) if args.diag_target_file is not None else None,
                 "split_metadata": str(args.split_metadata) if args.split_metadata is not None else None,
                 "scratch_root": str(args.scratch_root) if args.scratch_root is not None else None,
                 "run_name": args.run_name,
@@ -234,6 +235,34 @@ def resolve_output_dir(args: argparse.Namespace) -> Path:
         scratch_root = Path(scratch_env)
     args.scratch_root = scratch_root.expanduser().resolve()
     return (args.scratch_root / "Thesis_runs" / args.run_name).resolve()
+
+
+def resolve_diag_targets_for_scratch(dataset: DiffusionImageDataset, args: argparse.Namespace) -> dict[str, object]:
+    if args.aux_loss_mode != "data_driven_diag" or args.diag_target_file is None:
+        return resolve_diag_targets(dataset, args)
+
+    diag_target_file = args.diag_target_file.expanduser().resolve()
+    if not diag_target_file.exists():
+        raise FileNotFoundError(f"diag_target_file does not exist: {diag_target_file}")
+
+    with diag_target_file.open() as json_file:
+        payload = json.load(json_file)
+
+    values = payload.get("diag_targets")
+    if not isinstance(values, list) or len(values) != 3:
+        raise ValueError(f"diag_target_file must contain a diag_targets list of three RGB values: {diag_target_file}")
+
+    try:
+        targets = torch.tensor([float(value) for value in values], dtype=torch.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"diag_targets must contain numeric RGB values: {diag_target_file}") from exc
+
+    args.diag_target_file = diag_target_file
+    return {
+        "targets": targets,
+        "source": payload.get("source", "diag_target_file"),
+        "num_images": payload.get("num_images"),
+    }
 
 
 def fail_early(args: argparse.Namespace) -> None:
@@ -279,6 +308,7 @@ def print_startup_diagnostics(args: argparse.Namespace, dataset: DiffusionImageD
         "sample_every",
         "use_ema",
         "aux_loss_mode",
+        "diag_target_file",
         "symmetry_weight",
         "diag_weight",
         "disable_symmetry_loss",
@@ -351,6 +381,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional split_metadata.csv used to compute data-driven diagonal targets from train images only.",
+    )
+    parser.add_argument(
+        "--diag-target-file",
+        type=Path,
+        default=None,
+        help="Optional JSON file with precomputed RGB diagonal targets for data_driven_diag mode.",
     )
     parser.add_argument("--symmetry-weight", type=float, default=0.01, help="Weight for notebook channel-0 symmetry loss.")
     parser.add_argument("--diag-weight", type=float, default=0.01, help="Weight for diagonal auxiliary loss.")

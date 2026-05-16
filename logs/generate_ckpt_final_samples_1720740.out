@@ -1,0 +1,65 @@
+===== Job info =====
+compute-6-13.cluster.lan
+Sat May 16 08:47:40 AM UTC 2026
+HOME=/home/jliu
+SCRATCH=/mnt/beegfs-compat/jliu
+PWD=/home/jliu/Thesis
+PYTHON=/home/jliu/.conda/envs/thesis-diffusion/bin/python
+/home/jliu/.conda/envs/thesis-diffusion/bin/python
+2.12.0+cu126
+True
+NVIDIA A40
+===== A) pureMSE, 50 steps =====
+checkpoint_dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_pureMSE/checkpoint-final
+output_dir=/mnt/beegfs-compat/jliu/Thesis_eval/pureMSE_checkpoint_final_samples_50
+num_inference_steps=50
+===== Sample generation configuration =====
+checkpoint-dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_pureMSE/checkpoint-final
+output-dir=/mnt/beegfs-compat/jliu/Thesis_eval/pureMSE_checkpoint_final_samples_50
+num-samples=16
+batch-size=4
+image-size=224
+num-inference-steps=50
+seed=42
+Generated 16 samples in /mnt/beegfs-compat/jliu/Thesis_eval/pureMSE_checkpoint_final_samples_50
+===== B) pureMSE, 100 steps =====
+checkpoint_dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_pureMSE/checkpoint-final
+output_dir=/mnt/beegfs-compat/jliu/Thesis_eval/pureMSE_checkpoint_final_samples_100
+num_inference_steps=100
+===== Sample generation configuration =====
+checkpoint-dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_pureMSE/checkpoint-final
+output-dir=/mnt/beegfs-compat/jliu/Thesis_eval/pureMSE_checkpoint_final_samples_100
+num-samples=16
+batch-size=4
+image-size=224
+num-inference-steps=100
+seed=42
+Generated 16 samples in /mnt/beegfs-compat/jliu/Thesis_eval/pureMSE_checkpoint_final_samples_100
+===== C) dataDrivenDiag_precomputed, 50 steps =====
+checkpoint_dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed/checkpoint-final
+output_dir=/mnt/beegfs-compat/jliu/Thesis_eval/dataDrivenDiag_checkpoint_final_samples_50
+num_inference_steps=50
+===== Sample generation configuration =====
+checkpoint-dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed/checkpoint-final
+output-dir=/mnt/beegfs-compat/jliu/Thesis_eval/dataDrivenDiag_checkpoint_final_samples_50
+num-samples=16
+batch-size=4
+image-size=224
+num-inference-steps=50
+seed=42
+Generated 16 samples in /mnt/beegfs-compat/jliu/Thesis_eval/dataDrivenDiag_checkpoint_final_samples_50
+===== D) dataDrivenDiag_precomputed, 100 steps =====
+checkpoint_dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed/checkpoint-final
+output_dir=/mnt/beegfs-compat/jliu/Thesis_eval/dataDrivenDiag_checkpoint_final_samples_100
+num_inference_steps=100
+===== Sample generation configuration =====
+checkpoint-dir=/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_10000step_bs8_dataDrivenDiag_precomputed/checkpoint-final
+output-dir=/mnt/beegfs-compat/jliu/Thesis_eval/dataDrivenDiag_checkpoint_final_samples_100
+num-samples=16
+batch-size=4
+image-size=224
+num-inference-steps=100
+seed=42
+Generated 16 samples in /mnt/beegfs-compat/jliu/Thesis_eval/dataDrivenDiag_checkpoint_final_samples_100
+===== Finished =====
+Sat May 16 08:53:01 AM UTC 2026
