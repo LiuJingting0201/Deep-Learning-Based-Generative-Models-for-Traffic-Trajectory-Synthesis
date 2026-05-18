@@ -264,3 +264,45 @@ Diagonal statistics are mixed. Pure MSE moves the blue diagonal channel from `0.
 Color shift remains the main concern. Pure MSE at 150 steps is slightly less red-positive than the matched 50-step set (`0.0137` vs `0.0349`), but both are far from the real red mean of `-0.3830`. DataDrivenDiag remains strongly red-biased under both settings (`0.2007` at 50 steps and `0.1939` at 150 steps). Qualitatively, 150-step samples have crisper grids, but DataDrivenDiag still shows strong red/yellow/magenta regions and the final-checkpoint examples remain color-shifted.
 
 Recommendation: use 150 reverse diffusion steps when the goal is best image-level sample quality for reporting or offline evaluation, because matched FID and edge sharpness improve. Keep 50 steps for fast periodic monitoring during training, because the 150-step setting is more expensive and does not improve symmetry or diagonal-target calibration. As before, this ablation is image-only and does not evaluate decoded trajectory quality or map/road-network validity.
+
+### Channel-wise GAF diagnostics: color shift as channel-distribution mismatch
+
+Although the generated samples are saved as RGB PNG images, the three channels should not be interpreted as natural-image colors. They correspond to trajectory-derived representations: `R = GASF`, `G = GADF`, and `B = MTF`. Therefore abnormal magenta/yellow/red regions in generated images are better interpreted as distribution mismatch among the GASF/GADF/MTF channels, not as ordinary visual color artifacts.
+
+The current channel diagnostics suggest that the major issue is not severe cross-channel coupling collapse. The pixel-level channel correlations are close in structure to the real data:
+
+| Set | corr(GASF,GADF) | corr(GADF,MTF) | corr(GASF,MTF) |
+|---|---:|---:|---:|
+| Real | `-0.0003` | `-0.0089` | `-0.1559` |
+| Pure MSE generated | `0.0044` | `-0.0151` | `-0.0682` |
+| DataDrivenDiag generated | `-0.0446` | `-0.0225` | `-0.0942` |
+
+The generated samples preserve the near-independent relationship between GASF/GADF and GADF/MTF, and partially preserve the weak negative correlation between GASF and MTF. The GASF-MTF negative correlation is weaker than in real data, especially for pure MSE, but the correlation structure is not completely destroyed.
+
+The more likely dominant failure mode is channel-wise marginal distribution shift. Real images have RGB/channel mean `[-0.3830, 0.0004, -0.1905]`. The generated sample means are shifted upward in the GASF/R channel:
+
+| Set | RGB/channel mean |
+|---|---:|
+| Real | `[-0.3830, 0.0004, -0.1905]` |
+| Pure MSE | `[-0.1555, -0.0399, -0.0403]` |
+| DataDrivenDiag | `[-0.0032, -0.0580, -0.0457]` |
+
+The red/GASF channel shifts upward strongly, especially in DataDrivenDiag. This explains the visual appearance of abnormal magenta/yellow/red regions: the model tends to over-activate the GASF channel relative to the real distribution.
+
+There is also saturation-like behavior. Generated samples often have q99 values close to `1.0`, especially in red/blue-related channels, while real images have q99 values below `1.0` (`[0.9216, 0.9608, 0.9608]`). This suggests that the issue is not merely a small mean drift; some generated channel values are pushed toward normalization boundaries.
+
+Overall, the DDPM has learned coarse GAF-like grid structure and has not completely destroyed the channel relationship. However, it has not correctly matched the marginal distribution of each mathematical channel. This means the diagonal constraint improves only a local statistic; it is insufficient to enforce global channel validity. The apparent color artifacts are therefore better understood as GASF/GADF/MTF distribution mismatch.
+
+Supporting per-channel symmetry diagnostics show that the structural errors are channel-specific, not just global blur. Real GASF/R is exactly symmetric, while generated GASF/R has nonzero symmetry error (`0.0410` for pure MSE and `0.0617` for DataDrivenDiag). Real GADF/G is naturally asymmetric (`0.6070`), so high asymmetry in that channel should not be interpreted as a failure by itself. The largest structural mismatch is in MTF/B: real MTF/B symmetry error is only `0.0673`, while pure MSE is `0.2715` and DataDrivenDiag is `0.2280`. Thus, MTF/B appears to be a major contributor to fragmented or structurally inconsistent GAF patterns.
+
+Post-hoc affine calibration was also tested as a diagnostic, not as a final solution. Calibrated images were saved under `results_hpc/channel_diagnostics/pureMSE_calibrated` and `results_hpc/channel_diagnostics/dataDrivenDiag_calibrated`, with calibrated metrics under `results_hpc/channel_diagnostics/calibrated_image_quality_analysis`. Calibration improved exploratory FID substantially: pure MSE improved from `74.6189` to `63.2486`, and DataDrivenDiag improved from `81.0313` to `67.6198`. It also moved the RGB means much closer to the real distribution: pure MSE from `[0.0137, 0.0033, -0.0719]` to `[-0.3641, 0.0011, -0.1623]`, and DataDrivenDiag from `[0.1939, -0.0365, -0.2593]` to `[-0.3631, 0.0006, -0.2037]`.
+
+However, calibration does not solve all structure. Global symmetry slightly worsened after calibration (`0.2738` to `0.2940` for pure MSE; `0.2892` to `0.2907` for DataDrivenDiag), because channel rescaling changes the relative weight of each channel in the global metric. This supports a nuanced interpretation: channel-wise mean/std mismatch is a major part of the image-level distribution problem, but cross-channel consistency and channel-specific GAF structure still need to be preserved.
+
+The next step should be lightweight before changing model architecture. First, perform post-hoc channel-wise calibration:
+
+`x'_c = ((x_c - mean_gen_c) / std_gen_c) * std_real_c + mean_real_c`
+
+Then reevaluate FID, channel statistics, symmetry, edge strength, and diagonal statistics after calibration. If calibration helps, train a channel-wise normalized DDPM where each channel is standardized independently during training and inverse-transformed after generation. A cross-channel correlation loss should be considered later, because the current mismatch appears weaker than the marginal channel shift.
+
+This remains an image-space diagnostic only. It does not evaluate decoded trajectories, road-network validity, or map compliance.
