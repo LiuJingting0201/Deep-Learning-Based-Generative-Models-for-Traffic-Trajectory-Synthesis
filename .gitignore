@@ -21,6 +21,7 @@ Map_Matching/
 data/raw/*
 data/processed/*
 data_no_speed_paired/
+data_no_speed_delta_displacement_paired/
 results/*
 !results/.gitkeep
 !results/figures/
@@ -38,6 +39,10 @@ RGB_Images_PNG_ReducedSize_*/
 Data_*/
 *.npy
 *.npz
+*.tar
+*.tar.gz
+*.tgz
+*.zip
 trajectories_prediction.pkl
 
 # Experiment outputs
@@ -65,6 +70,7 @@ checkpoints/
 logs/
 logs/slurm/
 results_hpc/
+Thesis_eval/
 data_latent_delta_224/
 data_latent_delta_224_latent28/
 *.out

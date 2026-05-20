@@ -306,3 +306,543 @@ The next step should be lightweight before changing model architecture. First, p
 Then reevaluate FID, channel statistics, symmetry, edge strength, and diagonal statistics after calibration. If calibration helps, train a channel-wise normalized DDPM where each channel is standardized independently during training and inverse-transformed after generation. A cross-channel correlation loss should be considered later, because the current mismatch appears weaker than the marginal channel shift.
 
 This remains an image-space diagnostic only. It does not evaluate decoded trajectories, road-network validity, or map compliance.
+
+### Channel-wise normalized DDPM experiment
+
+Motivation: post-hoc channel-wise affine calibration substantially improved image-level FID for the 150-step generated samples, suggesting that a large part of the failure is channel mean/std mismatch. Pure MSE improved from `74.62` to `63.25`, and DataDrivenDiag improved from `81.03` to `67.62` after calibration. Calibration does not solve all structure, especially the weaker generated `corr(GASF,MTF)` and high MTF/B symmetry error, so the next controlled experiment isolates channel-wise normalization alone before adding any structural, correlation, or MTF-specific losses.
+
+Two channel-normalized 50k runs were completed:
+
+| Run | Aux loss | Scratch output | Home copy | SLURM job |
+|---|---|---|---|---:|
+| `ddpm_scratch_50000step_bs8_channelNorm_pureMSE` | `none` | `/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_50000step_bs8_channelNorm_pureMSE` | `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_channelNorm_pureMSE` | `1726249` |
+| `ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed` | `data_driven_diag` | `/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed` | `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed` | `1726299` |
+
+Training-set channel statistics were computed from the train split in `split_metadata.csv` (`n=2527`) and saved to:
+
+`/mnt/beegfs-compat/jliu/Thesis_data/data_no_speed_delta_displacement_paired/diagnostics/channel_stats_train.json`
+
+The stats are in normalized `[-1, 1]` image space:
+
+| Channel | mean | std | q01 | q50 | q99 | saturation `fraction(|x|>0.98)` |
+|---|---:|---:|---:|---:|---:|---:|
+| GASF/R | `-0.3820` | `0.4853` | `-1.0000` | `-0.5137` | `0.9216` | `0.0482` |
+| GADF/G | `0.0004` | `0.4369` | `-0.9608` | `0.0039` | `0.9608` | `0.0136` |
+| MTF/B | `-0.1918` | `0.8527` | `-1.0000` | `-0.7882` | `0.9608` | `0.1523` |
+
+Training uses the same pixel-space DDPM setup as the earlier 50k baselines, except that each image is standardized channel-wise before diffusion training:
+
+`x_norm[c] = (x[c] - mean[c]) / (std[c] + 1e-6)`
+
+The model is trained in this standardized channel space. During sampling, generated standardized samples are inverse-transformed before saving PNG images:
+
+`x_raw[c] = x_norm[c] * std[c] + mean[c]`
+
+Then `x_raw` is clamped to `[-1, 1]` and saved as a normal GAF PNG. Existing non-normalized runs keep the default `--channel-normalization-mode none` and should behave as before.
+
+Exact training configuration:
+
+| Field | Value |
+|---|---:|
+| `image_size` | `224` |
+| `batch_size` | `8` |
+| `gradient_accumulation_steps` | `2` |
+| `max_train_steps` | `50000` |
+| `save_every` | `2500` |
+| `sample_every` | `2500` |
+| `sample_inference_steps` | `150` |
+| `channel_normalization_mode` | `standardize` |
+
+A GPU smoke test was run before full submission. The smoke test used `max_train_steps=2`, `batch_size=2`, `sample_every=1`, and `save_every=1`. It verified that the channel-normalized path starts training, writes checkpoints and inverse-transformed PNG samples, and produces finite losses. A second smoke run with `--channel-normalization-mode none` also completed, confirming backward compatibility for the old path.
+
+Matched samples were generated from checkpoints `25000` and `50000`, with 40 samples per checkpoint. Both 50-step and 150-step reverse diffusion settings were evaluated, giving 80 generated images per method per sampling setting:
+
+- ChannelNorm PureMSE 50-step samples: `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_channelNorm_pureMSE/samples_50steps_matched`
+- ChannelNorm DataDrivenDiag 50-step samples: `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed/samples_50steps_matched`
+- ChannelNorm PureMSE 150-step samples: `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_channelNorm_pureMSE/samples_150steps_matched`
+- ChannelNorm DataDrivenDiag 150-step samples: `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed/samples_150steps_matched`
+
+Evaluation outputs:
+
+- `/home/jliu/Thesis/results_hpc/channelNorm_50k_sampling_steps_50_analysis`
+- `/home/jliu/Thesis/results_hpc/channelNorm_50k_sampling_steps_150_analysis`
+- `/home/jliu/Thesis/results_hpc/channelNorm_channel_diagnostics_50`
+- `/home/jliu/Thesis/results_hpc/channelNorm_channel_diagnostics_150`
+
+Main image-level comparison against the previous non-normalized baselines:
+
+| Method | Sampling steps | FID vs real | RGB mean | RGB-mean L2 to train mean | Global symmetry | Edge strength | Diagonal RGB mean |
+|---|---:|---:|---|---:|---:|---:|---|
+| PureMSE | 50 | `78.03` | `[0.0349, 0.0260, -0.0538]` | `0.4399` | `0.2685` | `0.1436` | `[0.0174, 0.0270, 0.6346]` |
+| DataDrivenDiag | 50 | `93.93` | `[0.2007, -0.0896, -0.2588]` | `0.5935` | `0.2504` | `0.1362` | `[0.1616, -0.0854, 0.5792]` |
+| ChannelNorm PureMSE | 50 | `134.15` | `[-0.3634, 0.0955, -0.0162]` | `0.2005` | `0.1679` | `0.1283` | `[-0.3599, 0.0965, 0.4860]` |
+| ChannelNorm DataDrivenDiag | 50 | `145.09` | `[-0.2691, -0.0580, -0.2562]` | `0.1426` | `0.2016` | `0.1386` | `[-0.2730, -0.0516, 0.5200]` |
+| PureMSE | 150 | `74.62` | `[0.0137, 0.0033, -0.0719]` | `0.4135` | `0.2738` | `0.1465` | `[0.0000, 0.0048, 0.6732]` |
+| DataDrivenDiag | 150 | `81.03` | `[0.1939, -0.0365, -0.2593]` | `0.5811` | `0.2892` | `0.1519` | `[0.1569, -0.0326, 0.6313]` |
+| ChannelNorm PureMSE | 150 | `130.62` | `[-0.3716, 0.0731, -0.1230]` | `0.1006` | `0.1808` | `0.1374` | `[-0.3676, 0.0745, 0.4650]` |
+| ChannelNorm DataDrivenDiag | 150 | `137.00` | `[-0.3078, -0.0390, -0.2729]` | `0.1168` | `0.2075` | `0.1437` | `[-0.3109, -0.0334, 0.5217]` |
+
+Interpretation: channel-wise normalization does what it was designed to do in a narrow sense. It moves the generated RGB/channel means much closer to the training distribution, especially for the red/GASF channel. The 150-step ChannelNorm PureMSE run has the smallest RGB-mean distance to the train mean (`0.1006`), compared with `0.4135` for the non-normalized 150-step PureMSE baseline. It also reduces global symmetry error, but this should not be over-interpreted because GADF/G is not expected to be perfectly symmetric.
+
+However, the overall image distribution does not improve. FID becomes substantially worse for both ChannelNorm runs (`130.62` and `137.00` at 150 steps, compared with `74.62` and `81.03` for the non-normalized 150-step baselines). The representative grids also show stronger green/cyan channel dominance and smoother/lower-contrast regions rather than a clean restoration of realistic GAF texture. This suggests that matching channel means during training is not sufficient, and may make the inverse-transformed PNG distribution look less like the real image distribution under Inception features.
+
+Channel-wise diagnostics support the same conclusion:
+
+| Method | Steps | corr(GASF,MTF) | GASF sym | GADF sym | MTF sym | Saturation R/G/B |
+|---|---:|---:|---:|---:|---:|---|
+| Real | - | `-0.1559` | `0.0000` | `0.6070` | `0.0673` | `[0.0478, 0.0135, 0.1516]` |
+| ChannelNorm PureMSE | 50 | `0.0022` | `0.0251` | `0.1684` | `0.3102` | `[0.0000, 0.0000, 0.1215]` |
+| ChannelNorm DataDrivenDiag | 50 | `-0.0555` | `0.0411` | `0.1782` | `0.3855` | `[0.0000, 0.0000, 0.0954]` |
+| ChannelNorm PureMSE | 150 | `-0.0218` | `0.0246` | `0.1809` | `0.3368` | `[0.0000, 0.0000, 0.1171]` |
+| ChannelNorm DataDrivenDiag | 150 | `-0.1537` | `0.0398` | `0.1895` | `0.3932` | `[0.0000, 0.0000, 0.1072]` |
+
+The best structural signal is that ChannelNorm DataDrivenDiag at 150 steps recovers the weak negative `corr(GASF,MTF)` almost exactly (`-0.1537` vs real `-0.1559`). The failure is that this does not translate into better FID or per-channel structure: MTF/B symmetry remains much too high (`0.3932` vs real `0.0673`), and GADF/G symmetry is far below the real value (`0.1895` vs `0.6070`). The diagonal constraint also no longer directly targets raw-space diagonal values during training; it is applied in standardized space and inverse-transformed for saving, so the raw diagonal means improve for red but remain far from the blue/MTF target.
+
+Preliminary conclusion:
+
+1. Channel-wise normalization alone is not a successful replacement for the non-normalized 50k pixel-space DDPM baseline.
+2. It improves marginal channel means and reduces saturation, so the earlier color shift diagnosis was partly correct.
+3. It does not preserve the full per-channel GAF structure, especially MTF/B symmetry and GADF/G behavior.
+4. DataDrivenDiag plus ChannelNorm improves `corr(GASF,MTF)` at 150 steps, but this single improvement is not enough to improve FID or visual GAF quality.
+5. For reporting, keep the non-normalized 150-step PureMSE as the strongest current pixel-space baseline by FID, and treat ChannelNorm as an informative ablation rather than a new default.
+
+Next decision:
+
+- Do not add channel-wise normalization as the default yet.
+- If continuing pixel-space DDPM, the next controlled ablation should target MTF/B structure directly, because ChannelNorm did not fix MTF symmetry.
+- Keep the channel-correlation loss as a later option: correlation mismatch is not the clearest first failure after this ablation.
+- For future map-conditioned diffusion, preserve this lesson: matching marginal channel statistics is useful but insufficient without channel-specific structural validity.
+
+No trajectory-level or map-compliance claims should be made from this experiment alone.
+
+### MTF/B-channel structural prior experiment
+
+Motivation: the ChannelNorm ablation showed that matching channel marginals is not sufficient. It improved RGB/channel mean distance strongly, and ChannelNorm DataDrivenDiag recovered `corr(GASF,MTF)` at 150 sampling steps (`-0.1537` vs real `-0.1559`), but FID worsened substantially (`130.62`/`137.00` vs raw 150-step `74.62`/`81.03`). The most persistent structural failure is the MTF/B channel: real MTF/B symmetry error is about `0.0673`, while ChannelNorm PureMSE/DataDrivenDiag remain much higher (`0.3368`/`0.3932`). The next controlled experiment therefore tests whether a targeted B-channel structural prior improves GAF validity without changing channel normalization, architecture, or adding correlation loss.
+
+The new auxiliary loss is applied to the predicted clean image `x0_pred` estimated from the noisy image and predicted noise:
+
+`B = x0_pred[:, 2:3, :, :]`
+
+`L_mtf_sym = mean(abs(B - B.transpose(-1, -2)))`
+
+For the PureMSE variant:
+
+`total_loss = mse_loss + mtf_symmetry_weight * L_mtf_sym`
+
+For the DataDrivenDiag variant:
+
+`total_loss = mse_loss + diag_weight * diag_loss + mtf_symmetry_weight * L_mtf_sym`
+
+This is intentionally not combined with ChannelNorm, full RGB symmetry, or correlation loss.
+
+Two 50k raw pixel-space runs were submitted:
+
+| Run | Aux mode | Weights | SLURM script | Job |
+|---|---|---|---|---:|
+| `ddpm_scratch_50000step_bs8_mtfSym_pureMSE` | `mtf_symmetry` | `mtf_symmetry_weight=0.01` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_mtfSym_pureMSE.slurm` | `1727501` |
+| `ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed` | `data_driven_diag_mtf_symmetry` | `diag_weight=0.01`, `mtf_symmetry_weight=0.01` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed.slurm` | `1727502` |
+
+Expected outputs:
+
+- `/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_50000step_bs8_mtfSym_pureMSE`
+- `/mnt/beegfs-compat/jliu/Thesis_runs/ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed`
+- `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_mtfSym_pureMSE`
+- `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed`
+
+Shared training configuration:
+
+| Field | Value |
+|---|---:|
+| `image_size` | `224` |
+| `batch_size` | `8` |
+| `gradient_accumulation_steps` | `2` |
+| `lr` | `1e-4` |
+| `max_train_steps` | `50000` |
+| `save_every` | `2500` |
+| `sample_every` | `2500` |
+| `sample_inference_steps` | `150` |
+| `channel_normalization_mode` | `none` |
+
+A GPU smoke test was run with `max_train_steps=2`, `batch_size=2`, `sample_every=1`, `save_every=1`, and `sample_inference_steps=2`. It covered both `mtf_symmetry` and `data_driven_diag_mtf_symmetry`. Both modes trained without shape errors or NaNs, saved PNG samples, and logged `mtf_symmetry_loss`. The smoke log showed finite losses, for example `mtf_symmetry_loss=0.8886` at step 1 for both modes.
+
+After training finishes, matched evaluation should use checkpoints `25000` and `50000`, with 40 samples per checkpoint and 150 reverse diffusion steps, giving 80 generated samples per method. The comparison set should include:
+
+1. raw PureMSE 150-step
+2. raw DataDrivenDiag 150-step
+3. ChannelNorm PureMSE 150-step
+4. ChannelNorm DataDrivenDiag 150-step
+5. MTFSym PureMSE 150-step
+6. MTFSym DataDrivenDiag 150-step
+
+Primary success criteria:
+
+- MTF/B symmetry should move toward the real value (`~0.0673`).
+- FID should not collapse as it did for ChannelNorm.
+- RGB/channel distributions should not become worse than the raw PureMSE baseline.
+- Generated images should preserve regular GAF grid structure.
+
+Interpretation plan: if MTF symmetry improves without FID collapse, this suggests that the B/MTF channel is a bottleneck for GAF structural validity. If symmetry improves but FID worsens, the prior may be too strong or may conflict with the learned image distribution. If symmetry does not improve, then the issue may require architecture or representation changes rather than a simple auxiliary loss.
+
+### MTF/B-channel structural prior evaluation update
+
+The MTFSym evaluation is now configured to generate new samples only for the two MTFSym runs. Previous raw and ChannelNorm baseline samples and metrics are reused and are not regenerated.
+
+New sample-generation/evaluation driver:
+
+- `scripts/slurm/generate_mtfSym_50k_matched_samples_and_eval.slurm`
+- Submitted job: `1728930`
+
+Note: initial submission `1728929` landed on `compute-3-14` and stopped before sample generation because CUDA was unavailable in the allocated job. The driver now has an explicit CUDA preflight, and `1728930` was resubmitted excluding that node.
+
+New analysis code:
+
+- `scripts/analyze_mtf_sym_150_evaluation.py`
+
+MTFSym sample generation targets:
+
+| Run | Checkpoints | Samples | Scheduler | Steps | Batch size | Output |
+|---|---|---:|---|---:|---:|---|
+| `ddpm_scratch_50000step_bs8_mtfSym_pureMSE` | `checkpoint-25000`, `checkpoint-50000` | `40` per checkpoint | DDPM | `150` | `8` | `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_mtfSym_pureMSE/samples_150steps` |
+| `ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed` | `checkpoint-25000`, `checkpoint-50000` | `40` per checkpoint | DDPM | `150` | `8` | `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed/samples_150steps` |
+
+Generated filenames use checkpoint-aware prefixes:
+
+- `checkpoint25000_sample000.png` ... `checkpoint25000_sample039.png`
+- `checkpoint50000_sample000.png` ... `checkpoint50000_sample039.png`
+
+The Slurm driver refuses to overwrite partial MTFSym sample output. If a checkpoint output directory already contains exactly 40 files for the requested prefix, it reuses them; if it contains a nonzero partial count, it exits.
+
+Six-way comparison set:
+
+1. raw PureMSE 150-step
+2. raw DataDrivenDiag 150-step
+3. ChannelNorm PureMSE 150-step
+4. ChannelNorm DataDrivenDiag 150-step
+5. MTFSym PureMSE 150-step
+6. MTFSym DataDrivenDiag 150-step
+
+Primary outputs:
+
+- Main analysis: `/home/jliu/Thesis/results_hpc/mtfSym_50k_sampling_steps_150_analysis`
+- Channel diagnostics: `/home/jliu/Thesis/results_hpc/mtfSym_channel_diagnostics_150`
+
+Reuse policy:
+
+- Raw baseline samples are read from the existing `samples_150steps` directories.
+- ChannelNorm baseline samples are read from the existing `samples_150steps_matched` directories.
+- Existing raw and ChannelNorm FID JSONs are loaded from their previous analysis directories.
+- Only MTFSym FID JSONs are computed by the new job.
+
+Interpretation focus after job completion:
+
+- whether MTFSym moves MTF/B symmetry toward the real value (`~0.0673`)
+- whether FID remains closer to raw baselines than to the ChannelNorm collapse regime
+- whether RGB/channel mean L2 is better or worse than raw baselines
+- whether `corr(GASF,MTF)` moves toward the real value (`~-0.1559`)
+- whether DataDrivenDiag + MTFSym improves diagonal target distance
+- whether visual color quality improves without ChannelNorm-style FID collapse
+
+Completed results:
+
+| Method | FID vs real | RGB mean | RGB-mean L2 to real | MTF/B symmetry | corr(GASF,MTF) | Diag target L2 | Saturation R/G/B |
+|---|---:|---|---:|---:|---:|---:|---|
+| Real | - | `[-0.3830, 0.0004, -0.1905]` | - | `0.0673` | `-0.1559` | - | `[0.0478, 0.0135, 0.1516]` |
+| raw PureMSE | `74.62` | `[0.0137, 0.0033, -0.0719]` | `0.4141` | `0.2715` | `-0.0682` | `0.3828` | `[0.0086, 0.0035, 0.0770]` |
+| raw DataDrivenDiag | `81.03` | `[0.1939, -0.0365, -0.2593]` | `0.5822` | `0.2280` | `-0.0942` | `0.5464` | `[0.0366, 0.0129, 0.0964]` |
+| ChannelNorm PureMSE | `130.62` | `[-0.3716, 0.0731, -0.1230]` | `0.0998` | `0.3368` | `-0.0218` | `0.3179` | `[0.0000, 0.0000, 0.1171]` |
+| ChannelNorm DataDrivenDiag | `137.00` | `[-0.3078, -0.0390, -0.2729]` | `0.1183` | `0.3932` | `-0.1537` | `0.2625` | `[0.0000, 0.0000, 0.1072]` |
+| MTFSym PureMSE | `84.98` | `[0.1147, 0.0068, -0.7060]` | `0.7166` | `0.1207` | `0.0670` | `0.5275` | `[0.0270, 0.0032, 0.4423]` |
+| MTFSym DataDrivenDiag | `93.96` | `[0.2198, 0.0478, -0.7119]` | `0.7984` | `0.1124` | `0.0250` | `0.5937` | `[0.0384, 0.0131, 0.3866]` |
+
+Interpretation:
+
+MTFSym succeeds on the targeted structural metric. PureMSE improves MTF/B symmetry from `0.2715` to `0.1207`, and DataDrivenDiag improves from `0.2280` to `0.1124`, both moving substantially toward the real value of `~0.0673`. This is the clearest evidence so far that a B-channel structural prior can affect the intended GAF property.
+
+The improvement is not free. FID worsens relative to the raw 150-step baselines (`74.62` to `84.98` for PureMSE, `81.03` to `93.96` for DataDrivenDiag), but it does not collapse to the ChannelNorm regime (`130.62`/`137.00`). This means MTFSym is less damaging to image-level realism than ChannelNorm, but still not a better default than the raw baselines by FID.
+
+RGB/channel mean L2 becomes worse than raw baselines. Both MTFSym runs shift the B/MTF mean strongly negative (`~ -0.71`) and show much higher B-channel saturation (`0.44` and `0.39` vs real `0.15`). This suggests the symmetry prior may be encouraging a simpler or overly dark B-channel solution rather than preserving realistic MTF intensity statistics.
+
+`corr(GASF,MTF)` moves in the wrong direction. Instead of approaching real `~-0.1559`, MTFSym PureMSE becomes positive (`0.0670`) and MTFSym DataDrivenDiag becomes weakly positive (`0.0250`). This is worse than the raw baselines and much worse than ChannelNorm DataDrivenDiag, which matched the real correlation well despite poor FID.
+
+DataDrivenDiag + MTFSym does not improve diagonal target distance. It worsens from `0.5464` to `0.5937`, while PureMSE also worsens from `0.3828` to `0.5275`. The targeted MTF symmetry gain therefore does not transfer to diagonal calibration.
+
+Preliminary conclusion: targeted MTFSym is useful as a diagnostic but should not replace the raw 150-step baseline. It proves that the B-channel symmetry error is controllable, but the current weight/objective trades that improvement for worse color/channel statistics, worse correlation structure, and moderately worse FID. A softer MTF symmetry weight or a combined MTF-statistics constraint might be worth testing later, but the next default should remain raw PureMSE or raw DataDrivenDiag depending on whether FID or diagonal structure is prioritized.
+
+### DDIM sampling ablation: DDPM vs DDIM at 150 reverse steps
+
+Motivation: the previous ablations changed training objectives or preprocessing. This ablation keeps the trained 50k raw pixel-space DDPM checkpoints fixed and changes only the sampling scheduler from DDPM to DDIM. The goal is to test whether the observed color/channel and structure artifacts are partly caused by the reverse sampler rather than by the learned model distribution.
+
+Setup:
+
+- Checkpoints: `checkpoint-25000` and `checkpoint-50000`
+- Samples: 40 per checkpoint, 80 per method
+- Reverse steps: `150`
+- Image size: `224`
+- DDIM eta: `0.0`
+- No retraining
+
+DDIM samples were saved to:
+
+- `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_pureMSE/samples_ddim_150steps`
+- `/home/jliu/Thesis/results_hpc/ddpm_scratch_50000step_bs8_dataDrivenDiag_precomputed/samples_ddim_150steps`
+
+Evaluation outputs were saved under:
+
+`/home/jliu/Thesis/results_hpc/ddim_150step_ablation_analysis`
+
+The generator was updated to support `--scheduler ddpm|ddim`, `--eta`, and checkpoint-aware filename prefixes. A smoke test generated 4 DDIM samples from PureMSE `checkpoint-25000` and verified that images saved correctly without scheduler or device errors.
+
+Main comparison:
+
+| Method | Sampler | FID vs real | RGB mean | RGB-mean L2 to train mean | Global symmetry | MTF/B symmetry | corr(GASF,MTF) | Edge strength | Diagonal RGB mean |
+|---|---|---:|---|---:|---:|---:|---:|---:|---|
+| PureMSE | DDPM | `74.62` | `[0.0137, 0.0033, -0.0719]` | `0.4135` | `0.2738` | `0.2715` | `-0.0682` | `0.1465` | `[0.0000, 0.0048, 0.6732]` |
+| PureMSE | DDIM | `93.41` | `[0.0205, 0.0058, -0.0720]` | `0.4200` | `0.2815` | `0.3567` | `-0.0692` | `0.1605` | `[0.0110, 0.0073, 0.5943]` |
+| DataDrivenDiag | DDPM | `81.03` | `[0.1939, -0.0365, -0.2593]` | `0.5811` | `0.2892` | `0.2280` | `-0.0942` | `0.1519` | `[0.1569, -0.0326, 0.6313]` |
+| DataDrivenDiag | DDIM | `98.71` | `[0.0508, -0.0421, -0.1758]` | `0.4352` | `0.2889` | `0.3447` | `-0.1275` | `0.1745` | `[0.0256, -0.0382, 0.5805]` |
+
+DDIM does not improve the main image-quality metric in this setting. FID worsens for both methods: PureMSE increases from `74.62` to `93.41`, and DataDrivenDiag increases from `81.03` to `98.71`. PureMSE channel statistics are nearly unchanged, while DataDrivenDiag DDIM moves the RGB mean closer to the train distribution (`0.5811` to `0.4352` L2), but this does not translate into better FID.
+
+The structural diagnostics are also not improved. MTF/B symmetry worsens substantially for both methods: PureMSE increases from `0.2715` to `0.3567`, and DataDrivenDiag increases from `0.2280` to `0.3447`, farther from the real value (`~0.0673`). Edge strength increases under DDIM, and the representative comparison grid shows more fine fragmented grid texture rather than cleaner GAF structure.
+
+There are two narrower improvements for DataDrivenDiag DDIM: `corr(GASF,MTF)` moves closer to real (`-0.1275` vs real `-0.1559`), and the diagonal target distance improves from `0.5464` to `0.4418`. However, these local/statistical gains are outweighed by worse FID and worse MTF/B symmetry.
+
+Preliminary conclusion: DDIM sampling with `eta=0.0` at 150 reverse steps is not a better default for these 50k raw pixel-space DDPM checkpoints. The main MTF/B structural failure and global image-distribution mismatch are unlikely to be solved by switching the sampler alone; they more likely reflect the learned model distribution or the GAF image representation. No trajectory-level or map-compliance claims are made from this image-space ablation.
+
+# Hybrid Multi-head Decoder V2 Results and Analysis
+
+## Motivation
+
+Before diffusion-based generation can be trusted, the invertibility of the representation itself must be validated.
+
+The key question is:
+
+Can real GAF images be accurately decoded back into physical trajectories?
+
+The decoder acts as the bridge between image representation and physical trajectory space. If real-image decoding fails, generated-image decoding errors become inseparable from decoder errors. Therefore, the decoder experiment is not only an auxiliary supervised task; it is a prerequisite for interpreting any trajectory recovered from generated GAF images.
+
+## Architecture
+
+Hybrid V2 was implemented as a multi-head decoder from real GAF images to physical trajectory components.
+
+Input:
+
+- GAF image with shape `[3 x 224 x 224]`
+
+Shared encoder:
+
+- scratch ResNet18 backbone
+
+Prediction heads:
+
+1. Delta head
+   - predicts a `[224, 2]` relative displacement sequence
+
+2. Start head
+   - predicts `[x0, y0]`
+
+3. Centroid head
+   - predicts `[xc, yc]`
+
+Trajectory reconstruction:
+
+`pred_abs = pred_start + cumulative(pred_delta)`
+
+The centroid head is used only as auxiliary supervision. It is not used to directly correct the reconstructed trajectory.
+
+## Main Findings
+
+On the test split, the observed Hybrid V2 results were:
+
+| Metric | Value |
+|---|---:|
+| learned-start integrated ADE | `107.85` |
+| oracle-start integrated ADE | `158.46` |
+| learned-start ADE improvement | `~50.6` |
+| learned-start integrated FDE | `147.2` |
+| oracle-start integrated FDE | `211.5` |
+| learned-start FDE improvement | `~64.3` |
+
+Train, validation, and test splits show the same trend.
+
+Unexpected finding:
+
+learned-start consistently outperformed oracle-start.
+
+This contradicted the initial hypothesis.
+
+## Interpretation
+
+The initial expectation was:
+
+`true_start + predicted_delta`
+
+should outperform:
+
+`predicted_start + predicted_delta`
+
+The observed result was the opposite: the predicted start performs significantly better.
+
+A plausible explanation is that the predicted delta sequence contains systematic bias. The learned start point then behaves as a compensatory latent anchor:
+
+`pred_start ~= true_start + correction`
+
+Under this interpretation, the network may learn a trajectory-level offset that compensates for accumulated delta integration drift. Therefore, `pred_start` and `pred_delta` become jointly optimized.
+
+This means the model may not learn physical localization in a strictly interpretable way. Instead, it may learn a latent alignment coordinate system that produces lower integrated trajectory error after the start and delta predictions are combined.
+
+## Secondary Observation
+
+Visual inspection suggests that global drift improved.
+
+However, high-curvature turns became smoother. Sharp right-angle turns were often rounded.
+
+A possible explanation is that ADE-style losses favor globally smooth trajectories and can suppress high-frequency turning geometry. Pointwise metrics alone may not preserve maneuver fidelity.
+
+## Implication
+
+Trajectory reconstruction quality should not be evaluated solely through ADE/FDE.
+
+Trajectory geometry must also be considered. This motivates geometry-aware supervision and geometry-aware evaluation in the next experiment.
+
+## Next-step Plan
+
+### Geometry-aware Trajectory Evaluation
+
+Planned metrics:
+
+- heading error
+- turn-angle error
+- sharp-turn recall
+- sharp-turn precision
+- curvature error
+
+Definitions:
+
+heading:
+
+`atan2(dy, dx)`
+
+turn angle:
+
+`heading[t+1] - heading[t]`
+
+Sharp turn:
+
+`abs(turn angle) > 45 degrees`
+
+Purpose:
+
+quantify whether Hybrid V2 improves global localization at the cost of local maneuver geometry.
+
+### Hybrid V3
+
+Future loss:
+
+`Loss = delta + start + centroid + ADE + heading_loss + turn_loss`
+
+Heading loss:
+
+`1 - cos(pred_heading - gt_heading)`
+
+Turn loss:
+
+`1 - cos(pred_turn - gt_turn)`
+
+Expected:
+
+preserve sharp turns while retaining reduced drift.
+
+Current conclusion:
+
+The bottleneck no longer appears to be model capacity.
+
+The bottleneck may instead be insufficient geometric supervision.
+
+## Delta-displacement Multi-branch Decoder and Slurm Workflow
+
+A supervised decoder pipeline was added for the no-speed delta-displacement paired dataset. It keeps the dataset-builder convention unchanged:
+
+- input image: pseudo-modal RGB `[B, 3, 224, 224]`, where `R=GASF`, `G=GADF`, and `B=MTF`
+- target: physical unnormalized delta displacement `[B, 224, 2]`
+- integration: `xy[:,0,:]=start_xy` and `xy[:,1:,:]=start_xy[:,None,:]+cumsum(delta[:,1:,:], dim=1)`
+- `delta[:,0,:]` remains a placeholder and is not integrated
+
+Implemented code and docs:
+
+- `src/cnr_trajectory/reconstruction/delta_displacement.py`
+- `scripts/train_delta_displacement_decoder.py`
+- `scripts/train_multi_branch_delta_decoder.py` compatibility wrapper
+- `tests/test_delta_displacement_decoder_smoke.py`
+- `docs/delta_multibranch_decoder.md`
+
+The decoder now supports:
+
+- `--model multi_branch_delta` with independent pseudo-modal channel encoders
+- `--model simple_cnn_delta` baseline
+- `--channels rgb|r|g|b`
+- `--encoder-type small_gap|small_spatial`, with `small_spatial` as the default
+- optional `--normalize-target-delta`
+- optional `--split-metadata` for fair ablation reuse
+
+Slurm workflow:
+
+- Smoke job: `slurm/smoke_delta_multibranch_decoder.slurm`
+- Main beta ablation: `slurm/run_delta_multibranch_ablation.slurm`
+- Channel/baseline ablation: `slurm/run_delta_channel_ablation.slurm`
+- Helper notes: `slurm/submit_delta_decoder_jobs.sh`
+- Result collector: `scripts/collect_delta_decoder_results.py`
+
+The smoke job passed after switching the Slurm scripts to the HPC conda environment:
+
+```bash
+module purge
+module load miniconda3/3.13.25
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate thesis-diffusion
+PYTHON="$(which python)"
+```
+
+PoliTO Slurm rejected `#SBATCH --array=...` with `Invalid job array specification`, so the ablation scripts were converted to normal single-task submissions controlled by `DELTA_TASK_ID`.
+
+Main beta ablation submission:
+
+```bash
+for task_id in 1 2 3 4 5 6; do
+  sbatch --export=ALL,DELTA_TASK_ID="$task_id" slurm/run_delta_multibranch_ablation.slurm
+done
+```
+
+Task mapping:
+
+| `DELTA_TASK_ID` | Experiment |
+|---:|---|
+| 1 | multi-branch RGB, beta `0.0` |
+| 2 | multi-branch RGB, beta `0.05` |
+| 3 | multi-branch RGB, beta `0.2` |
+| 4 | multi-branch RGB, normalized target, beta `0.0` |
+| 5 | multi-branch RGB, normalized target, beta `0.05` |
+| 6 | multi-branch RGB, normalized target, beta `0.2` |
+
+Channel/baseline ablation submission:
+
+```bash
+for task_id in 1 2 3 4 5; do
+  sbatch --export=ALL,DELTA_TASK_ID="$task_id" slurm/run_delta_channel_ablation.slurm
+done
+```
+
+Result collection:
+
+```bash
+python scripts/collect_delta_decoder_results.py \
+  --results-root results_hpc \
+  --output-prefix results_hpc/delta_decoder_ablation_summary
+```
+
+Validation performed locally:
+
+- `python -m py_compile scripts/train_delta_displacement_decoder.py`
+- `python -m py_compile src/cnr_trajectory/reconstruction/delta_displacement.py`
+- `python -m py_compile scripts/collect_delta_decoder_results.py`
+- `bash -n` on all delta decoder Slurm scripts
