@@ -75,3 +75,7 @@ data_latent_delta_224/
 data_latent_delta_224_latent28/
 *.out
 *.err
+
+# Week 03 generated artifacts
+week03/logs/
+week03/results/
