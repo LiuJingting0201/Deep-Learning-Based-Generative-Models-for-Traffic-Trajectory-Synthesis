@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib.pyplot as plt
+from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -60,10 +62,13 @@ MODEL_TYPES = {
     "hard_resnet18": HardStructureResNet18DeltaDecoder,
     "decomp_mtf_local_resnet18": DecompMtfLocalResNet18DeltaDecoder,
 }
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "week03" / "results" / "structure_resnet18_decoder"
+DEFAULT_MAP_DIR = Path("/home/jliu/data_no_speed_delta_displacement_paired/maps_oracle_bbox")
 
 
 def main() -> None:
     args = parse_args()
+    finalize_output_dir(args)
     set_seed(args.seed)
     device = resolve_device(args.device)
 
@@ -72,6 +77,8 @@ def main() -> None:
         (output_dir / subdir).mkdir(parents=True, exist_ok=True)
 
     split_metadata = verify_delta_data_and_split(args.data_root.resolve())
+    if args.use_map:
+        preflight_map_inputs(args, split_metadata)
     if not args.skip_training:
         train(args, split_metadata, device)
     summary = evaluate(args, split_metadata, device)
@@ -84,9 +91,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "week03" / "results" / "structure_resnet18_decoder",
+        default=DEFAULT_OUTPUT_DIR,
     )
     parser.add_argument("--model-type", choices=sorted(MODEL_TYPES), default="decomp_resnet18")
+    parser.add_argument("--use-map", action="store_true")
+    parser.add_argument("--map-dir", type=Path, default=DEFAULT_MAP_DIR)
+    parser.add_argument("--map-fusion", choices=["concat"], default="concat")
+    parser.add_argument("--run-name", default="")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -103,11 +114,131 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_model(model_type: str, dropout: float) -> nn.Module:
+class MapConcatDeltaDisplacementDataset(DeltaDisplacementDataset):
+    def __init__(self, data_root: Path, metadata: pd.DataFrame, scaler: object, map_dir: Path) -> None:
+        super().__init__(data_root, metadata, scaler)
+        self.map_dir = map_dir
+
+    def __getitem__(self, index: int) -> dict[str, object]:
+        item = super().__getitem__(index)
+        sample_id = str(item["sample_id"])
+        map_path = self.map_dir / f"{sample_id}_map.png"
+        if not map_path.exists():
+            raise FileNotFoundError(map_path)
+        map_image = Image.open(map_path).convert("L")
+        if map_image.size != (224, 224):
+            raise ValueError(f"Expected 224x224 map for {sample_id}, got {map_image.size}")
+        map_tensor = torch.from_numpy(np.asarray(map_image, dtype=np.float32) / 255.0).unsqueeze(0)
+        item["map"] = map_tensor.contiguous()
+        item["map_path"] = str(map_path)
+        item["image"] = torch.cat([item["image"], item["map"]], dim=0).contiguous()
+        return item
+
+
+def make_dataset(args: argparse.Namespace, data_root: Path, metadata: pd.DataFrame, scaler: object) -> DeltaDisplacementDataset:
+    if not args.use_map:
+        return DeltaDisplacementDataset(data_root, metadata, scaler)
+    if args.map_fusion != "concat":
+        raise ValueError(f"Unsupported map fusion: {args.map_fusion}")
+    return MapConcatDeltaDisplacementDataset(data_root, metadata, scaler, args.map_dir.resolve())
+
+
+def build_model(model_type: str, dropout: float, input_channels: int = 3) -> nn.Module:
     model_class = MODEL_TYPES[model_type]
+    if input_channels != 3 and model_type != "raw_resnet18":
+        raise ValueError("Map concat is currently implemented only for --model-type raw_resnet18.")
+    if model_type == "raw_resnet18":
+        return model_class(dropout=dropout, in_channels=input_channels)
     if model_type == "decomp_resnet18":
         return model_class(dropout=dropout, return_debug=False)
     return model_class(dropout=dropout)
+
+
+def input_channels(args: argparse.Namespace) -> int:
+    return 4 if args.use_map and args.map_fusion == "concat" else 3
+
+
+def infer_map_crop_mode(map_dir: Path) -> str:
+    name = map_dir.expanduser().resolve().name
+    if "oracle_bbox" in name:
+        return "oracle_bbox"
+    if "start_center" in name:
+        return "start_center"
+    return name.replace("maps_", "") or "unknown_crop"
+
+
+def finalize_output_dir(args: argparse.Namespace) -> None:
+    if not args.use_map:
+        return
+    if args.model_type != "raw_resnet18":
+        raise ValueError("Map concat is currently implemented only with --model-type raw_resnet18.")
+    crop_mode = infer_map_crop_mode(args.map_dir)
+    run_name = args.run_name or args.model_type
+    suffix = f"map_concat_{crop_mode}_{run_name}"
+    output_dir = args.output_dir
+    if suffix not in output_dir.name:
+        args.output_dir = output_dir / suffix
+
+
+def preflight_map_inputs(args: argparse.Namespace, split_metadata: pd.DataFrame) -> None:
+    map_dir = args.map_dir.resolve()
+    sample_ids = split_metadata["sample_id"].astype(str).tolist()
+    missing = [sample_id for sample_id in sample_ids if not (map_dir / f"{sample_id}_map.png").exists()]
+    found = len(sample_ids) - len(missing)
+    print(f"Map preflight: found {found}/{len(sample_ids)} maps in {map_dir}; missing {len(missing)}.")
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise FileNotFoundError(
+            f"Missing {len(missing)} map raster(s) in {map_dir}. "
+            f"Expected files like {{sample_id}}_map.png. First missing: {preview}"
+        )
+
+    extents_path = extent_metadata_path(map_dir)
+    if extents_path.exists():
+        extents = pd.read_csv(extents_path)
+        required = {"sample_id", "min_x", "max_x", "min_y", "max_y", "crs", "crop_mode"}
+        missing_columns = required.difference(extents.columns)
+        if missing_columns:
+            print(
+                f"WARNING: map extent metadata is missing columns {sorted(missing_columns)}; "
+                "map-background plots will be skipped."
+            )
+            return
+        missing_extent_ids = sorted(set(sample_ids) - set(extents["sample_id"].astype(str)))
+        print(
+            f"Map extent preflight: found metadata for {len(sample_ids) - len(missing_extent_ids)}/"
+            f"{len(sample_ids)} samples in {extents_path}."
+        )
+        if missing_extent_ids:
+            print(
+                "WARNING: map extent metadata is incomplete; map-background plots will be skipped. "
+                f"First missing extents: {', '.join(missing_extent_ids[:10])}"
+            )
+    else:
+        print(f"WARNING: map extent metadata not found at {extents_path}; map-background plots will be skipped.")
+
+
+def extent_metadata_path(map_dir: Path) -> Path:
+    name = map_dir.resolve().name
+    if "oracle_bbox" in name:
+        return map_dir.parent / "maps_oracle_bbox_extents.csv"
+    if "start_center" in name:
+        return map_dir.parent / "maps_start_center_extents.csv"
+    return map_dir.parent / f"{name}_extents.csv"
+
+
+def load_extent_lookup(map_dir: Path) -> dict[str, dict[str, object]] | None:
+    path = extent_metadata_path(map_dir)
+    if not path.exists():
+        print(f"WARNING: skipping map-background plots because extent metadata is missing: {path}")
+        return None
+    frame = pd.read_csv(path)
+    required = {"sample_id", "min_x", "max_x", "min_y", "max_y", "crs", "crop_mode"}
+    missing = required.difference(frame.columns)
+    if missing:
+        print(f"WARNING: skipping map-background plots because {path} is missing columns: {sorted(missing)}")
+        return None
+    return {str(row.sample_id): row._asdict() for row in frame.itertuples(index=False)}
 
 
 def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.device) -> None:
@@ -123,7 +254,7 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
     write_json(output_dir / "config.json", config)
 
     train_loader = DataLoader(
-        DeltaDisplacementDataset(data_root, train_metadata, scaler),
+        make_dataset(args, data_root, train_metadata, scaler),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
@@ -131,14 +262,14 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
         drop_last=len(train_metadata) % args.batch_size == 1,
     )
     val_loader = DataLoader(
-        DeltaDisplacementDataset(data_root, val_metadata, scaler),
+        make_dataset(args, data_root, val_metadata, scaler),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
     )
 
-    model = build_model(args.model_type, args.dropout).to(device)
+    model = build_model(args.model_type, args.dropout, input_channels(args)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = nn.MSELoss()
     best_val_loss = float("inf")
@@ -229,7 +360,7 @@ def make_config(
             "model": model_class_name(args.model_type),
             "backbone": "torchvision.models.resnet18(weights=None)",
             "pretrained": False,
-            "conv1_input_channels": conv1_input_channels(args.model_type),
+            "conv1_input_channels": input_channels(args) if args.use_map else conv1_input_channels(args.model_type),
             "head": "feature_dim -> 1024 -> 448 -> reshape[224,2]",
             "optimizer": "Adam",
             "scheduler": "none",
@@ -239,6 +370,18 @@ def make_config(
             "coordinate_space": "delta_displacement_xy",
             "integrated_absolute_evaluation": "oracle true start point",
             "input_representation": describe_input_representation(args.model_type),
+            "map_crop_mode": infer_map_crop_mode(args.map_dir) if args.use_map else "none",
+            "map_fusion_effective": args.map_fusion if args.use_map else "none",
+            "map_extent_metadata": str(extent_metadata_path(args.map_dir)) if args.use_map else "none",
+            "trajectory_coordinate_frame": "raw local x/y from labels_absolute, not projected lon/lat",
+            "map_coordinate_frame": "projected OSM CRS from extent metadata when --use-map is enabled",
+            "map_background_overlay_warning": (
+                "Map raster extents are projected OSM coordinates, while decoder trajectories are raw local x/y; "
+                "map-background plots are diagnostic only and are not geometrically valid overlays without an "
+                "explicit x/y-to-projected transform."
+                if args.use_map
+                else "none"
+            ),
             "device_resolved": str(device),
             "train_samples": len(train_metadata),
             "val_samples": len(val_metadata),
@@ -263,7 +406,7 @@ def evaluate(
     from run_resnet18_decoder_ablation import LabelScaler  # noqa: PLC0415
 
     scaler = LabelScaler(mean=scaler_data["mean"], std=scaler_data["std"])
-    model = build_model(args.model_type, args.dropout).to(device)
+    model = build_model(args.model_type, args.dropout, input_channels(args)).to(device)
     checkpoint = torch.load(output_dir / "checkpoints" / "best_model.pt", map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -279,7 +422,7 @@ def evaluate(
     for split in ["train", "val", "test"]:
         split_frame = split_metadata[split_metadata["split"] == split].copy()
         loader = DataLoader(
-            DeltaDisplacementDataset(data_root, split_frame, scaler),
+            make_dataset(args, data_root, split_frame, scaler),
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
@@ -324,6 +467,15 @@ def evaluate(
     write_json(evaluation_dir / "delta_distribution_diagnostics.json", distribution_summary)
     write_json(evaluation_dir / "prediction_variance_diagnostics.json", variance_summary)
     plot_evaluation_outputs(per_sample, per_timestep, predictions_abs["test"], truths_abs["test"], plots_dir)
+    if args.use_map:
+        plot_map_background_groups(
+            per_sample,
+            predictions_abs["test"],
+            truths_abs["test"],
+            args.map_dir.resolve(),
+            infer_map_crop_mode(args.map_dir),
+            plots_dir / "map_background",
+        )
     plot_delta_distribution_diagnostics(per_sample, plots_dir)
     return {
         "checkpoint": checkpoint,
@@ -438,6 +590,92 @@ def describe_input_representation(model_type: str) -> str:
     return descriptions[model_type]
 
 
+def plot_map_background_groups(
+    per_sample: pd.DataFrame,
+    predictions_abs: dict[str, np.ndarray],
+    truths_abs: dict[str, np.ndarray],
+    map_dir: Path,
+    crop_mode: str,
+    output_dir: Path,
+) -> None:
+    extent_lookup = load_extent_lookup(map_dir)
+    if extent_lookup is None:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    test_rows = per_sample[per_sample["split"] == "test"].copy()
+    sorted_rows = test_rows.sort_values("integrated_ADE").reset_index(drop=True)
+    groups = {
+        "best": sorted_rows.head(5),
+        "median": sorted_rows.iloc[
+            max(0, len(sorted_rows) // 2 - 2) : min(len(sorted_rows), len(sorted_rows) // 2 + 3)
+        ],
+        "worst": sorted_rows.tail(5).sort_values("integrated_ADE", ascending=False),
+    }
+    for group_name, frame in groups.items():
+        group_dir = output_dir / group_name
+        group_dir.mkdir(parents=True, exist_ok=True)
+        for row in frame.itertuples(index=False):
+            sample_id = str(row.sample_id)
+            plot_map_background_prediction(
+                sample_id,
+                str(row.vehicle_id),
+                truths_abs[sample_id],
+                predictions_abs[sample_id],
+                map_dir / f"{sample_id}_map.png",
+                extent_lookup.get(sample_id),
+                float(row.delta_ADE),
+                float(row.integrated_ADE),
+                float(row.integrated_FDE),
+                group_dir / f"{sample_id}_map_background_trajectory.png",
+            )
+
+
+def plot_map_background_prediction(
+    sample_id: str,
+    vehicle_id: str,
+    true: np.ndarray,
+    pred: np.ndarray,
+    map_path: Path,
+    extent_row: dict[str, object] | None,
+    delta_ade: float,
+    integrated_ade: float,
+    integrated_fde: float,
+    path: Path,
+) -> None:
+    if not map_path.exists():
+        return
+    if extent_row is None:
+        print(f"WARNING: skipping map-background plot for {sample_id}; extent metadata row is missing.")
+        return
+    map_image = np.asarray(Image.open(map_path).convert("L"), dtype=np.float32) / 255.0
+    extent = (
+        float(extent_row["min_x"]),
+        float(extent_row["max_x"]),
+        float(extent_row["min_y"]),
+        float(extent_row["max_y"]),
+    )
+    crop_mode = str(extent_row["crop_mode"])
+    fig, axis = plt.subplots(figsize=(5, 5))
+    axis.imshow(map_image, cmap="gray", origin="upper", extent=extent, alpha=0.45)
+    axis.plot(true[:, 0], true[:, 1], label="ground truth", linewidth=1.6, color="#1b9e77")
+    axis.plot(pred[:, 0], pred[:, 1], label="pred integrated", linewidth=1.6, color="#d95f02")
+    axis.scatter(true[0, 0], true[0, 1], s=22, marker="o", color="#1b9e77", label="gt/start")
+    axis.scatter(true[-1, 0], true[-1, 1], s=22, marker="s", color="#1b9e77", label="gt end")
+    axis.scatter(pred[-1, 0], pred[-1, 1], s=26, marker="^", color="#d95f02", label="pred end")
+    axis.set_xlim(extent[0], extent[1])
+    axis.set_ylim(extent[2], extent[3])
+    axis.set_aspect("equal", adjustable="box")
+    axis.set_title(
+        f"{sample_id} {vehicle_id} map={crop_mode}\n"
+        f"delta ADE={delta_ade:.2f} int ADE={integrated_ade:.2f} int FDE={integrated_fde:.2f}"
+    )
+    axis.legend(fontsize=7)
+    axis.grid(alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def model_class_name(model_type: str) -> str:
     return MODEL_TYPES[model_type].__name__
 
@@ -462,6 +700,7 @@ def write_week3_report(args: argparse.Namespace, summary: dict[str, object]) -> 
         "model": config["model"],
         "input_representation": config["input_representation"],
         "conv1_input_channels": config["conv1_input_channels"],
+        "map_background_overlay_warning": config.get("map_background_overlay_warning", "none"),
         "best_epoch": best["best_epoch"],
         "best_val_loss": best["best_val_loss"],
         "delta_ADE_FDE": {
@@ -490,6 +729,7 @@ def write_week3_report(args: argparse.Namespace, summary: dict[str, object]) -> 
         f"- model: {report['model']}",
         f"- input_representation: {report['input_representation']}",
         f"- conv1_input_channels: {report['conv1_input_channels']}",
+        f"- map_background_overlay_warning: {report['map_background_overlay_warning']}",
         f"- best_epoch: {report['best_epoch']}",
         f"- best_val_loss: {report['best_val_loss']}",
         "",

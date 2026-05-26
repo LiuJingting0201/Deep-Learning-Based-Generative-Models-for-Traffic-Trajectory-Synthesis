@@ -31,9 +31,11 @@ from structure_aware_resnet18_models import (  # noqa: E402
     RawResNet18DeltaDecoder,
     StructureDecomposedResNet18DeltaDecoder,
 )
+from train_structure_resnet18_decoder import MapConcatDeltaDisplacementDataset  # noqa: E402
 
 
 DATA_ROOT = Path("/home/jliu/data_no_speed_delta_displacement_paired")
+MAP_DIR = DATA_ROOT / "maps_oracle_bbox"
 OUTPUT_DIR = PROJECT_ROOT / "week03" / "results" / "smoke_structure_resnet18"
 
 
@@ -151,6 +153,24 @@ def main() -> None:
     pred_abs = integrate_delta_torch(start.to(pred_delta.device), pred_delta)
     assert list(pred_abs.shape) == [batch_size, 224, 2]
 
+    map_loader = DataLoader(
+        MapConcatDeltaDisplacementDataset(DATA_ROOT, subset_metadata.head(2), scaler, MAP_DIR),
+        batch_size=2,
+        shuffle=False,
+        num_workers=0,
+    )
+    map_batch = next(iter(map_loader))
+    map_image = map_batch["image"]
+    map_tensor = map_batch["map"]
+    assert list(map_image.shape) == [2, 4, 224, 224]
+    assert list(map_tensor.shape) == [2, 1, 224, 224]
+    assert bool(map_tensor.min() >= 0.0 and map_tensor.max() <= 1.0)
+    map_model = RawResNet18DeltaDecoder(dropout=0.3, in_channels=4).to(device)
+    map_model.eval()
+    with torch.no_grad():
+        map_pred = map_model(map_image.to(device))
+    assert list(map_pred.shape) == [2, 224, 2]
+
     true_abs_from_delta = integrate_delta_torch(start, raw_labels)
     integration_error = float((true_abs_from_delta - absolute).abs().max().cpu())
     integration_tolerance = 1e-3
@@ -177,6 +197,12 @@ def main() -> None:
         "structure_debug": structure_debug,
         "structure_pred_delta_shape": list(pred_delta.shape),
         "structure_pred_abs_shape": list(pred_abs.shape),
+        "map_dir": str(MAP_DIR),
+        "map_concat_image_shape": list(map_image.shape),
+        "map_tensor_shape": list(map_tensor.shape),
+        "map_tensor_stats": tensor_stats(map_tensor),
+        "map_concat_output_shape": list(map_pred.shape),
+        "map_concat_conv1_input_channels": int(map_model.conv1_in_channels),
         "true_delta_integration_max_error": integration_error,
         "true_delta_integration_tolerance": integration_tolerance,
         "true_delta_integration_sanity_passed": integration_sanity_passed,
@@ -229,6 +255,12 @@ def write_outputs(report: dict[str, Any]) -> None:
         f"- Image stats: {report['image_stats']}",
         f"- Per-channel stats: {report['per_channel_stats']}",
         f"- Image values in [0,1]: {report['image_values_in_0_1']}",
+        f"- Map dir: `{report['map_dir']}`",
+        f"- Map concat image shape: {report['map_concat_image_shape']}",
+        f"- Map tensor shape: {report['map_tensor_shape']}",
+        f"- Map tensor stats: {report['map_tensor_stats']}",
+        f"- Map concat output shape: {report['map_concat_output_shape']}",
+        f"- Map concat conv1 input channels: {report['map_concat_conv1_input_channels']}",
         f"- Label scaler mean: {report['label_scaler']['mean']}",
         f"- Label scaler std: {report['label_scaler']['std']}",
         "",

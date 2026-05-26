@@ -33,11 +33,13 @@ def build_resnet18_backbone(in_channels: int) -> tuple[nn.Module, int]:
     return backbone, feature_dim
 
 
-def _validate_rgb_input(x: torch.Tensor) -> None:
+def _validate_image_input(x: torch.Tensor, expected_channels: int = 3) -> None:
     if x.ndim != 4:
-        raise ValueError(f"Expected input ndim=4 [B,3,224,224], got shape {tuple(x.shape)}")
-    if x.shape[1] != 3:
-        raise ValueError(f"Expected 3 input channels, got {x.shape[1]}")
+        raise ValueError(
+            f"Expected input ndim=4 [B,{expected_channels},224,224], got shape {tuple(x.shape)}"
+        )
+    if x.shape[1] != expected_channels:
+        raise ValueError(f"Expected {expected_channels} input channels, got {x.shape[1]}")
     if x.shape[-2] != x.shape[-1]:
         raise ValueError(f"Expected square input, got H={x.shape[-2]} W={x.shape[-1]}")
     if x.shape[-2] != IMAGE_SIZE or x.shape[-1] != IMAGE_SIZE:
@@ -70,11 +72,11 @@ class _ResNet18DeltaDecoderBase(nn.Module):
 class RawResNet18DeltaDecoder(_ResNet18DeltaDecoderBase):
     """Raw RGB scratch ResNet18 delta-displacement decoder baseline."""
 
-    def __init__(self, dropout: float = 0.3) -> None:
-        super().__init__(in_channels=3, dropout=dropout)
+    def __init__(self, dropout: float = 0.3, in_channels: int = 3) -> None:
+        super().__init__(in_channels=in_channels, dropout=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _validate_rgb_input(x)
+        _validate_image_input(x, expected_channels=self.conv1_in_channels)
         return self._decode(x)
 
 
@@ -86,7 +88,7 @@ class StructureDecomposedResNet18DeltaDecoder(_ResNet18DeltaDecoderBase):
         self.return_debug = return_debug
 
     def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
-        _validate_rgb_input(x)
+        _validate_image_input(x)
         r = x[:, 0:1] * 2.0 - 1.0
         g = x[:, 1:2] * 2.0 - 1.0
         b = x[:, 2:3]
@@ -124,7 +126,7 @@ class HardStructureResNet18DeltaDecoder(_ResNet18DeltaDecoderBase):
         super().__init__(in_channels=3, dropout=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _validate_rgb_input(x)
+        _validate_image_input(x)
         r = x[:, 0:1] * 2.0 - 1.0
         g = x[:, 1:2] * 2.0 - 1.0
         b = x[:, 2:3]
@@ -140,7 +142,7 @@ class DecompMtfLocalResNet18DeltaDecoder(_ResNet18DeltaDecoderBase):
         super().__init__(in_channels=6, dropout=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _validate_rgb_input(x)
+        _validate_image_input(x)
         r = x[:, 0:1] * 2.0 - 1.0
         g = x[:, 1:2] * 2.0 - 1.0
         b = x[:, 2:3]
