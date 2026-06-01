@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
-        choices=["multi_branch_delta", "simple_cnn_delta"],
+        choices=["multi_branch_delta", "simple_cnn_delta", "mid_fusion_delta"],
         default="multi_branch_delta",
     )
     parser.add_argument(
@@ -599,4 +599,3 @@ def write_json(path: Path, payload: object) -> None:
 
 if __name__ == "__main__":
     main()
-

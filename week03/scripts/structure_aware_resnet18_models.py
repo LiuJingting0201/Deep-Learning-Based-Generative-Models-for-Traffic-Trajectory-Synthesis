@@ -80,6 +80,61 @@ class RawResNet18DeltaDecoder(_ResNet18DeltaDecoderBase):
         return self._decode(x)
 
 
+def _validate_map_input(x: torch.Tensor) -> None:
+    _validate_image_input(x, expected_channels=1)
+
+
+class LateFusionMapResNet18DeltaDecoder(nn.Module):
+    """Late feature-fusion decoder for non-pixel-aligned GAF/MTF images and maps.
+
+    GAF/MTF image axes encode timestep-timestep relational structure, while OSM
+    map rasters encode spatial x-y structure. This model keeps them in separate
+    encoders and fuses only their learned feature vectors.
+    """
+
+    def __init__(self, dropout: float = 0.3, map_feature_dim: int = 128) -> None:
+        super().__init__()
+        self.image_backbone, image_feature_dim = build_resnet18_backbone(in_channels=3)
+        self.map_feature_dim = map_feature_dim
+        self.map_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(128, map_feature_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.regressor = nn.Sequential(
+            nn.Linear(image_feature_dim + map_feature_dim, 1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(1024, TRAJECTORY_STEPS * TRAJECTORY_DIMS),
+        )
+
+    @property
+    def conv1_in_channels(self) -> int:
+        return int(self.image_backbone.conv1.in_channels)
+
+    def forward(self, image: torch.Tensor, map_raster: torch.Tensor) -> torch.Tensor:
+        _validate_image_input(image, expected_channels=3)
+        _validate_map_input(map_raster)
+        image_features = self.image_backbone(image)
+        map_features = self.map_encoder(map_raster)
+        values = self.regressor(torch.cat([image_features, map_features], dim=1))
+        pred = values.view(-1, TRAJECTORY_STEPS, TRAJECTORY_DIMS)
+        if pred.shape[1:] != (TRAJECTORY_STEPS, TRAJECTORY_DIMS):
+            raise RuntimeError(f"Unexpected decoder output shape: {tuple(pred.shape)}")
+        return pred
+
+
 class StructureDecomposedResNet18DeltaDecoder(_ResNet18DeltaDecoderBase):
     """Experiment C decoder using GASF/GADF theory components plus residuals."""
 

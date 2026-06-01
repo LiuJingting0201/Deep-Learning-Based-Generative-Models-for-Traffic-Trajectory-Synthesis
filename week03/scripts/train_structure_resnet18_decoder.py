@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import shutil
 import sys
@@ -14,6 +15,7 @@ import numpy as np
 import pandas as pd
 import torch
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader
@@ -29,7 +31,6 @@ from run_delta_displacement_resnet18_decoder_ablation import (  # noqa: E402
     DeltaDisplacementDataset,
     compute_basic_metrics,
     compute_variance_diagnostics,
-    evaluate_delta_loader,
     fit_delta_label_scaler,
     integrate_delta,
     plot_delta_distribution_diagnostics,
@@ -44,13 +45,13 @@ from run_resnet18_decoder_ablation import (  # noqa: E402
     format_metric,
     plot_training_curves,
     resolve_device,
-    run_epoch,
     set_seed,
     write_json,
 )
 from structure_aware_resnet18_models import (  # noqa: E402
     DecompMtfLocalResNet18DeltaDecoder,
     HardStructureResNet18DeltaDecoder,
+    LateFusionMapResNet18DeltaDecoder,
     RawResNet18DeltaDecoder,
     StructureDecomposedResNet18DeltaDecoder,
 )
@@ -58,16 +59,19 @@ from structure_aware_resnet18_models import (  # noqa: E402
 
 MODEL_TYPES = {
     "raw_resnet18": RawResNet18DeltaDecoder,
+    "late_map_resnet18": LateFusionMapResNet18DeltaDecoder,
     "decomp_resnet18": StructureDecomposedResNet18DeltaDecoder,
     "hard_resnet18": HardStructureResNet18DeltaDecoder,
     "decomp_mtf_local_resnet18": DecompMtfLocalResNet18DeltaDecoder,
 }
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "week03" / "results" / "structure_resnet18_decoder"
 DEFAULT_MAP_DIR = Path("/home/jliu/data_no_speed_delta_displacement_paired/maps_oracle_bbox")
+DEFAULT_RAW_TO_OSM_AFFINE = PROJECT_ROOT / "week03" / "data" / "maps" / "raw_xy_to_osm_affine.json"
 
 
 def main() -> None:
     args = parse_args()
+    validate_model_fusion_args(args)
     finalize_output_dir(args)
     set_seed(args.seed)
     device = resolve_device(args.device)
@@ -79,6 +83,8 @@ def main() -> None:
     split_metadata = verify_delta_data_and_split(args.data_root.resolve())
     if args.use_map:
         preflight_map_inputs(args, split_metadata)
+    if args.use_road_loss:
+        preflight_road_loss_inputs(args, split_metadata)
     if not args.skip_training:
         train(args, split_metadata, device)
     summary = evaluate(args, split_metadata, device)
@@ -96,7 +102,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-type", choices=sorted(MODEL_TYPES), default="decomp_resnet18")
     parser.add_argument("--use-map", action="store_true")
     parser.add_argument("--map-dir", type=Path, default=DEFAULT_MAP_DIR)
-    parser.add_argument("--map-fusion", choices=["concat"], default="concat")
+    parser.add_argument("--map-fusion", choices=["concat", "late"], default="concat")
+    parser.add_argument("--use-road-loss", action="store_true")
+    parser.add_argument("--distance-field-dir", type=Path, default=None)
+    parser.add_argument("--distance-field-metadata", type=Path, default=None)
+    parser.add_argument("--raw-to-osm-affine-json", type=Path, default=DEFAULT_RAW_TO_OSM_AFFINE)
+    parser.add_argument("--lambda-road", type=float, default=0.0)
+    parser.add_argument("--road-threshold-m", type=float, default=5.0)
+    parser.add_argument("--road-loss-mode", choices=["relu_threshold", "mean_distance"], default="relu_threshold")
+    parser.add_argument("--road-oob-weight", type=float, default=1.0)
     parser.add_argument("--run-name", default="")
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -114,10 +128,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-class MapConcatDeltaDisplacementDataset(DeltaDisplacementDataset):
-    def __init__(self, data_root: Path, metadata: pd.DataFrame, scaler: object, map_dir: Path) -> None:
+class MapDeltaDisplacementDataset(DeltaDisplacementDataset):
+    def __init__(
+        self,
+        data_root: Path,
+        metadata: pd.DataFrame,
+        scaler: object,
+        map_dir: Path,
+        map_fusion: str,
+    ) -> None:
         super().__init__(data_root, metadata, scaler)
         self.map_dir = map_dir
+        self.map_fusion = map_fusion
 
     def __getitem__(self, index: int) -> dict[str, object]:
         item = super().__getitem__(index)
@@ -131,20 +153,124 @@ class MapConcatDeltaDisplacementDataset(DeltaDisplacementDataset):
         map_tensor = torch.from_numpy(np.asarray(map_image, dtype=np.float32) / 255.0).unsqueeze(0)
         item["map"] = map_tensor.contiguous()
         item["map_path"] = str(map_path)
-        item["image"] = torch.cat([item["image"], item["map"]], dim=0).contiguous()
+        if self.map_fusion == "concat":
+            item["image"] = torch.cat([item["image"], item["map"]], dim=0).contiguous()
         return item
 
 
+class RoadLossDeltaDisplacementDataset(DeltaDisplacementDataset):
+    def __init__(
+        self,
+        data_root: Path,
+        metadata: pd.DataFrame,
+        scaler: object,
+        distance_field_dir: Path,
+        distance_field_metadata: Path,
+    ) -> None:
+        super().__init__(data_root, metadata, scaler)
+        self.distance_field_dir = distance_field_dir
+        self.extent_lookup = load_distance_field_extent_lookup(distance_field_metadata)
+
+    def __getitem__(self, index: int) -> dict[str, object]:
+        item = super().__getitem__(index)
+        return add_road_loss_fields(item, self.distance_field_dir, self.extent_lookup)
+
+
+class RoadLossMapDeltaDisplacementDataset(MapDeltaDisplacementDataset):
+    def __init__(
+        self,
+        data_root: Path,
+        metadata: pd.DataFrame,
+        scaler: object,
+        map_dir: Path,
+        map_fusion: str,
+        distance_field_dir: Path,
+        distance_field_metadata: Path,
+    ) -> None:
+        super().__init__(data_root, metadata, scaler, map_dir, map_fusion)
+        self.distance_field_dir = distance_field_dir
+        self.extent_lookup = load_distance_field_extent_lookup(distance_field_metadata)
+
+    def __getitem__(self, index: int) -> dict[str, object]:
+        item = super().__getitem__(index)
+        return add_road_loss_fields(item, self.distance_field_dir, self.extent_lookup)
+
+
+def load_distance_field_extent_lookup(path: Path) -> dict[str, dict[str, object]]:
+    frame = pd.read_csv(path)
+    required = {"sample_id", "min_x", "max_x", "min_y", "max_y"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Distance-field metadata {path} is missing columns: {sorted(missing)}")
+    return {str(row.sample_id): row._asdict() for row in frame.itertuples(index=False)}
+
+
+def add_road_loss_fields(
+    item: dict[str, object],
+    distance_field_dir: Path,
+    extent_lookup: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    sample_id = str(item["sample_id"])
+    distance_path = distance_field_dir / f"{sample_id}_distance.npy"
+    if not distance_path.exists():
+        raise FileNotFoundError(f"Missing distance field for {sample_id}: {distance_path}")
+    if sample_id not in extent_lookup:
+        raise KeyError(f"Missing distance-field extent metadata for sample_id={sample_id}")
+    distance = np.load(distance_path).astype(np.float32)
+    if distance.shape != (224, 224):
+        raise ValueError(f"Expected distance field shape (224, 224) for {sample_id}, got {distance.shape}")
+    if not np.isfinite(distance).all():
+        raise ValueError(f"Distance field contains NaN/Inf values for {sample_id}: {distance_path}")
+    extent_row = extent_lookup[sample_id]
+    extent = np.asarray(
+        [
+            float(extent_row["min_x"]),
+            float(extent_row["max_x"]),
+            float(extent_row["min_y"]),
+            float(extent_row["max_y"]),
+        ],
+        dtype=np.float32,
+    )
+    item["distance_field"] = torch.from_numpy(distance).unsqueeze(0).contiguous()
+    item["distance_extent"] = torch.from_numpy(extent)
+    item["distance_path"] = str(distance_path)
+    return item
+
+
 def make_dataset(args: argparse.Namespace, data_root: Path, metadata: pd.DataFrame, scaler: object) -> DeltaDisplacementDataset:
+    if args.use_road_loss and args.distance_field_dir is None:
+        raise ValueError("--distance-field-dir is required when --use-road-loss is enabled.")
+    if args.use_road_loss and args.distance_field_metadata is None:
+        raise ValueError("--distance-field-metadata is required when --use-road-loss is enabled.")
     if not args.use_map:
+        if args.use_road_loss:
+            return RoadLossDeltaDisplacementDataset(
+                data_root,
+                metadata,
+                scaler,
+                args.distance_field_dir.resolve(),
+                args.distance_field_metadata.resolve(),
+            )
         return DeltaDisplacementDataset(data_root, metadata, scaler)
-    if args.map_fusion != "concat":
+    if args.map_fusion not in {"concat", "late"}:
         raise ValueError(f"Unsupported map fusion: {args.map_fusion}")
-    return MapConcatDeltaDisplacementDataset(data_root, metadata, scaler, args.map_dir.resolve())
+    if args.use_road_loss:
+        return RoadLossMapDeltaDisplacementDataset(
+            data_root,
+            metadata,
+            scaler,
+            args.map_dir.resolve(),
+            args.map_fusion,
+            args.distance_field_dir.resolve(),
+            args.distance_field_metadata.resolve(),
+        )
+    return MapDeltaDisplacementDataset(data_root, metadata, scaler, args.map_dir.resolve(), args.map_fusion)
 
 
 def build_model(model_type: str, dropout: float, input_channels: int = 3) -> nn.Module:
     model_class = MODEL_TYPES[model_type]
+    if model_type == "late_map_resnet18":
+        return model_class(dropout=dropout)
     if input_channels != 3 and model_type != "raw_resnet18":
         raise ValueError("Map concat is currently implemented only for --model-type raw_resnet18.")
     if model_type == "raw_resnet18":
@@ -156,6 +282,25 @@ def build_model(model_type: str, dropout: float, input_channels: int = 3) -> nn.
 
 def input_channels(args: argparse.Namespace) -> int:
     return 4 if args.use_map and args.map_fusion == "concat" else 3
+
+
+def validate_model_fusion_args(args: argparse.Namespace) -> None:
+    if args.metrics_every < 1:
+        raise ValueError("--metrics-every must be >= 1")
+    if args.lambda_road < 0:
+        raise ValueError("--lambda-road must be >= 0")
+    if args.road_threshold_m < 0:
+        raise ValueError("--road-threshold-m must be >= 0")
+    if args.road_oob_weight < 0:
+        raise ValueError("--road-oob-weight must be >= 0")
+    if args.use_road_loss and args.lambda_road <= 0:
+        print("WARNING: --use-road-loss is enabled but --lambda-road <= 0, so it will not affect optimization.")
+    if args.model_type == "late_map_resnet18" and not (args.use_map and args.map_fusion == "late"):
+        raise ValueError("--model-type late_map_resnet18 requires --use-map --map-fusion late.")
+    if args.use_map and args.map_fusion == "concat" and args.model_type != "raw_resnet18":
+        raise ValueError("Map concat is currently implemented only with --model-type raw_resnet18.")
+    if args.use_map and args.map_fusion == "late" and args.model_type != "late_map_resnet18":
+        raise ValueError("Map late fusion requires --model-type late_map_resnet18.")
 
 
 def infer_map_crop_mode(map_dir: Path) -> str:
@@ -170,11 +315,9 @@ def infer_map_crop_mode(map_dir: Path) -> str:
 def finalize_output_dir(args: argparse.Namespace) -> None:
     if not args.use_map:
         return
-    if args.model_type != "raw_resnet18":
-        raise ValueError("Map concat is currently implemented only with --model-type raw_resnet18.")
     crop_mode = infer_map_crop_mode(args.map_dir)
     run_name = args.run_name or args.model_type
-    suffix = f"map_concat_{crop_mode}_{run_name}"
+    suffix = f"map_{args.map_fusion}_{crop_mode}_{run_name}"
     output_dir = args.output_dir
     if suffix not in output_dir.name:
         args.output_dir = output_dir / suffix
@@ -194,28 +337,61 @@ def preflight_map_inputs(args: argparse.Namespace, split_metadata: pd.DataFrame)
         )
 
     extents_path = extent_metadata_path(map_dir)
-    if extents_path.exists():
-        extents = pd.read_csv(extents_path)
-        required = {"sample_id", "min_x", "max_x", "min_y", "max_y", "crs", "crop_mode"}
-        missing_columns = required.difference(extents.columns)
-        if missing_columns:
-            print(
-                f"WARNING: map extent metadata is missing columns {sorted(missing_columns)}; "
-                "map-background plots will be skipped."
-            )
-            return
-        missing_extent_ids = sorted(set(sample_ids) - set(extents["sample_id"].astype(str)))
-        print(
-            f"Map extent preflight: found metadata for {len(sample_ids) - len(missing_extent_ids)}/"
-            f"{len(sample_ids)} samples in {extents_path}."
+    if not extents_path.exists():
+        raise FileNotFoundError(f"Map extent metadata not found: {extents_path}")
+    extents = pd.read_csv(extents_path)
+    required = {"sample_id", "min_x", "max_x", "min_y", "max_y", "crs", "crop_mode"}
+    missing_columns = required.difference(extents.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Map extent metadata {extents_path} is missing columns: {sorted(missing_columns)}"
         )
-        if missing_extent_ids:
-            print(
-                "WARNING: map extent metadata is incomplete; map-background plots will be skipped. "
-                f"First missing extents: {', '.join(missing_extent_ids[:10])}"
-            )
-    else:
-        print(f"WARNING: map extent metadata not found at {extents_path}; map-background plots will be skipped.")
+    missing_extent_ids = sorted(set(sample_ids) - set(extents["sample_id"].astype(str)))
+    print(
+        f"Map extent preflight: found metadata for {len(sample_ids) - len(missing_extent_ids)}/"
+        f"{len(sample_ids)} samples in {extents_path}."
+    )
+    if missing_extent_ids:
+        preview = ", ".join(missing_extent_ids[:10])
+        raise FileNotFoundError(
+            f"Map extent metadata is missing {len(missing_extent_ids)} sample_id row(s). "
+            f"First missing extents: {preview}"
+        )
+
+
+def preflight_road_loss_inputs(args: argparse.Namespace, split_metadata: pd.DataFrame) -> None:
+    if args.distance_field_dir is None:
+        raise ValueError("--distance-field-dir is required when --use-road-loss is enabled.")
+    if args.distance_field_metadata is None:
+        raise ValueError("--distance-field-metadata is required when --use-road-loss is enabled.")
+    distance_field_dir = args.distance_field_dir.resolve()
+    distance_metadata = args.distance_field_metadata.resolve()
+    affine_path = args.raw_to_osm_affine_json.resolve()
+    if not distance_field_dir.is_dir():
+        raise FileNotFoundError(f"Distance-field directory not found: {distance_field_dir}")
+    if not distance_metadata.exists():
+        raise FileNotFoundError(f"Distance-field metadata not found: {distance_metadata}")
+    if not affine_path.exists():
+        raise FileNotFoundError(f"Raw x/y to OSM affine JSON not found: {affine_path}")
+
+    frame = pd.read_csv(distance_metadata)
+    required = {"sample_id", "min_x", "max_x", "min_y", "max_y"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Distance-field metadata {distance_metadata} is missing columns: {sorted(missing)}")
+    sample_ids = split_metadata["sample_id"].astype(str).tolist()
+    metadata_ids = set(frame["sample_id"].astype(str))
+    missing_metadata = sorted(set(sample_ids) - metadata_ids)
+    missing_fields = [sample_id for sample_id in sample_ids if not (distance_field_dir / f"{sample_id}_distance.npy").exists()]
+    print(
+        f"Road-loss preflight: metadata rows={len(frame)} fields_dir={distance_field_dir} "
+        f"missing_metadata={len(missing_metadata)} missing_fields={len(missing_fields)}"
+    )
+    if missing_metadata:
+        raise FileNotFoundError(f"Missing distance-field metadata rows. First missing: {', '.join(missing_metadata[:10])}")
+    if missing_fields:
+        raise FileNotFoundError(f"Missing distance-field .npy files. First missing: {', '.join(missing_fields[:10])}")
+    load_raw_to_osm_affine_matrix(affine_path)
 
 
 def extent_metadata_path(map_dir: Path) -> Path:
@@ -241,6 +417,190 @@ def load_extent_lookup(map_dir: Path) -> dict[str, dict[str, object]] | None:
     return {str(row.sample_id): row._asdict() for row in frame.itertuples(index=False)}
 
 
+def forward_batch(
+    model: nn.Module,
+    batch: dict[str, object],
+    device: torch.device,
+    use_map: bool = False,
+    map_fusion: str = "none",
+) -> torch.Tensor:
+    images = batch["image"].to(device, non_blocking=True)
+    if use_map and map_fusion == "late":
+        maps = batch["map"].to(device, non_blocking=True)
+        return model(images, maps)
+    return model(images)
+
+
+def load_raw_to_osm_affine_matrix(path: Path) -> list[list[float]]:
+    payload = json.loads(path.read_text())
+    matrix = payload.get("affine_matrix")
+    if matrix is None:
+        raise ValueError(f"{path} does not contain affine_matrix")
+    array = np.asarray(matrix, dtype=np.float32)
+    if array.shape != (3, 2):
+        raise ValueError(f"Expected affine_matrix shape [3,2] in {path}, got {array.shape}")
+    stats = payload.get("residual_error_m", {})
+    p95 = float(stats.get("p95", 0.0))
+    if p95 > 25.0:
+        print(f"WARNING: affine p95 residual is {p95:.3f} m; road loss may be poorly aligned.")
+    return array.tolist()
+
+
+def write_train_log(path: Path, rows: list[dict[str, object]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def affine_tensor(matrix: list[list[float]], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    return torch.as_tensor(matrix, dtype=dtype, device=device)
+
+
+def integrate_delta_tensor(start: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+    absolute = torch.empty_like(delta)
+    absolute[:, 0, :] = start
+    if delta.shape[1] > 1:
+        absolute[:, 1:, :] = start.unsqueeze(1) + torch.cumsum(delta[:, 1:, :], dim=1)
+    return absolute
+
+
+def compute_road_loss(
+    pred_delta_norm_or_raw: torch.Tensor,
+    batch: dict[str, object],
+    scaler: object,
+    affine: list[list[float]],
+    args: argparse.Namespace,
+) -> torch.Tensor:
+    pred_delta_raw = scaler.inverse_transform_tensor(pred_delta_norm_or_raw)
+    starts = batch["start"].to(pred_delta_raw.device, dtype=pred_delta_raw.dtype, non_blocking=True)
+    pred_abs_raw = integrate_delta_tensor(starts, pred_delta_raw)
+
+    matrix = affine_tensor(affine, pred_abs_raw.dtype, pred_abs_raw.device)
+    ones = torch.ones((*pred_abs_raw.shape[:2], 1), dtype=pred_abs_raw.dtype, device=pred_abs_raw.device)
+    pred_abs_osm = torch.cat([pred_abs_raw, ones], dim=2) @ matrix
+
+    extents = batch["distance_extent"].to(pred_abs_raw.device, dtype=pred_abs_raw.dtype, non_blocking=True)
+    min_x = extents[:, 0].view(-1, 1)
+    max_x = extents[:, 1].view(-1, 1)
+    min_y = extents[:, 2].view(-1, 1)
+    max_y = extents[:, 3].view(-1, 1)
+    eps = torch.finfo(pred_abs_raw.dtype).eps
+    grid_x = 2.0 * (pred_abs_osm[:, :, 0] - min_x) / torch.clamp(max_x - min_x, min=eps) - 1.0
+    grid_y = 2.0 * (max_y - pred_abs_osm[:, :, 1]) / torch.clamp(max_y - min_y, min=eps) - 1.0
+    grid = torch.stack([grid_x, grid_y], dim=2)
+    oob = torch.relu(torch.abs(grid) - 1.0)
+    oob_penalty = oob.sum(dim=2).mean()
+    grid = torch.clamp(grid, -1.0, 1.0).unsqueeze(2)
+
+    distance_field = batch["distance_field"].to(pred_abs_raw.device, dtype=pred_abs_raw.dtype, non_blocking=True)
+    sampled = F.grid_sample(distance_field, grid, mode="bilinear", padding_mode="border", align_corners=True)
+    sampled_distance = sampled[:, 0, :, 0]
+    if args.road_loss_mode == "relu_threshold":
+        base_loss = torch.relu(sampled_distance - args.road_threshold_m).mean()
+    elif args.road_loss_mode == "mean_distance":
+        base_loss = sampled_distance.mean()
+    else:
+        raise ValueError(f"Unsupported road loss mode: {args.road_loss_mode}")
+    return base_loss + args.road_oob_weight * oob_penalty
+
+
+def run_epoch_map_aware(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    optimizer: torch.optim.Optimizer | None,
+    args: argparse.Namespace,
+    scaler: object,
+    affine: list[list[float]] | None,
+) -> dict[str, float]:
+    is_train = optimizer is not None
+    model.train(is_train)
+    total_loss = 0.0
+    total_delta_loss = 0.0
+    total_road_loss = 0.0
+    total_samples = 0
+    with torch.set_grad_enabled(is_train):
+        for batch in loader:
+            labels = batch["label"].to(device, non_blocking=True)
+            predictions = forward_batch(model, batch, device, args.use_map, args.map_fusion)
+            delta_loss = criterion(predictions, labels)
+            road_loss = torch.zeros((), dtype=delta_loss.dtype, device=delta_loss.device)
+            if args.use_road_loss:
+                if affine is None:
+                    raise ValueError("Road loss requested but affine transform is not loaded.")
+                road_loss = compute_road_loss(predictions, batch, scaler, affine, args)
+            loss = delta_loss + args.lambda_road * road_loss
+            if is_train:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
+            batch_size = labels.shape[0]
+            total_loss += float(loss.detach().cpu()) * batch_size
+            total_delta_loss += float(delta_loss.detach().cpu()) * batch_size
+            total_road_loss += float(road_loss.detach().cpu()) * batch_size
+            total_samples += batch_size
+    return {
+        "loss": total_loss / max(1, total_samples),
+        "delta_loss": total_delta_loss / max(1, total_samples),
+        "road_loss": total_road_loss / max(1, total_samples) if args.use_road_loss else float("nan"),
+    }
+
+
+def evaluate_delta_loader_map_aware(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    scaler: object,
+    device: torch.device,
+    compute_metrics: bool,
+    args: argparse.Namespace,
+    affine: list[list[float]] | None,
+) -> dict[str, float]:
+    model.eval()
+    total_loss = 0.0
+    total_delta_loss = 0.0
+    total_road_loss = 0.0
+    total_samples = 0
+    ade_sum = 0.0
+    fde_sum = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            labels_norm = batch["label"].to(device, non_blocking=True)
+            pred_norm = forward_batch(model, batch, device, args.use_map, args.map_fusion)
+            delta_loss = criterion(pred_norm, labels_norm)
+            road_loss = torch.zeros((), dtype=delta_loss.dtype, device=delta_loss.device)
+            if args.use_road_loss:
+                if affine is None:
+                    raise ValueError("Road loss requested but affine transform is not loaded.")
+                road_loss = compute_road_loss(pred_norm, batch, scaler, affine, args)
+            loss = delta_loss + args.lambda_road * road_loss
+            batch_size = labels_norm.shape[0]
+            total_loss += float(loss.detach().cpu()) * batch_size
+            total_delta_loss += float(delta_loss.detach().cpu()) * batch_size
+            total_road_loss += float(road_loss.detach().cpu()) * batch_size
+            if compute_metrics:
+                pred = scaler.inverse_transform_tensor(pred_norm)
+                true = scaler.inverse_transform_tensor(labels_norm)
+                point_errors = torch.linalg.norm(pred - true, dim=2)
+                ade_sum += float(point_errors.mean(dim=1).sum().detach().cpu())
+                fde_sum += float(point_errors[:, -1].sum().detach().cpu())
+            total_samples += batch_size
+    return {
+        "loss": total_loss / max(1, total_samples),
+        "delta_loss": total_delta_loss / max(1, total_samples),
+        "road_loss": total_road_loss / max(1, total_samples) if args.use_road_loss else float("nan"),
+        "ade": ade_sum / max(1, total_samples) if compute_metrics else float("nan"),
+        "fde": fde_sum / max(1, total_samples) if compute_metrics else float("nan"),
+    }
+
+
 def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.device) -> None:
     data_root = args.data_root.resolve()
     output_dir = args.output_dir.resolve()
@@ -252,6 +612,7 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
     shutil.copy2(data_root / "splits" / "split_metadata.csv", output_dir / "split_copy.csv")
     config = make_config(args, device, train_metadata, val_metadata)
     write_json(output_dir / "config.json", config)
+    road_affine = load_raw_to_osm_affine_matrix(args.raw_to_osm_affine_json.resolve()) if args.use_road_loss else None
 
     train_loader = DataLoader(
         make_dataset(args, data_root, train_metadata, scaler),
@@ -280,15 +641,43 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
     start_time = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(model, train_loader, criterion, device, optimizer)
-        compute_diag = epoch == 1 or epoch % args.metrics_every == 0
-        train_diag = evaluate_delta_loader(model, train_loader, criterion, scaler, device, compute_diag)
-        val_diag = evaluate_delta_loader(model, val_loader, criterion, scaler, device, compute_diag)
+        train_epoch = run_epoch_map_aware(model, train_loader, criterion, device, optimizer, args, scaler, road_affine)
+        train_loss = train_epoch["loss"]
+        run_full_eval = epoch == 1 or epoch % args.metrics_every == 0
+        if run_full_eval:
+            train_diag = evaluate_delta_loader_map_aware(
+                model, train_loader, criterion, scaler, device, compute_metrics=True, args=args, affine=road_affine
+            )
+            val_diag = evaluate_delta_loader_map_aware(
+                model, val_loader, criterion, scaler, device, compute_metrics=True, args=args, affine=road_affine
+            )
+        else:
+            train_diag = {
+                "loss": float("nan"),
+                "delta_loss": float("nan"),
+                "road_loss": train_epoch["road_loss"],
+                "ade": float("nan"),
+                "fde": float("nan"),
+            }
+            val_diag = {
+                "loss": float("nan"),
+                "delta_loss": float("nan"),
+                "road_loss": float("nan"),
+                "ade": float("nan"),
+                "fde": float("nan"),
+            }
         row = {
             "epoch": epoch,
             "train_loss": train_loss,
+            "train_delta_loss": train_epoch["delta_loss"],
+            "train_road_loss": train_diag["road_loss"] if run_full_eval else train_epoch["road_loss"],
             "train_eval_loss": train_diag["loss"],
             "val_loss": val_diag["loss"],
+            "val_delta_loss": val_diag["delta_loss"],
+            "val_road_loss": val_diag["road_loss"],
+            "lambda_road": args.lambda_road,
+            "road_threshold_m": args.road_threshold_m,
+            "road_loss_mode": args.road_loss_mode if args.use_road_loss else "none",
             "train_ADE": train_diag["ade"],
             "train_FDE": train_diag["fde"],
             "val_ADE": val_diag["ade"],
@@ -309,18 +698,23 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
             "label_scaler": asdict(scaler),
         }
         torch.save(checkpoint, output_dir / "checkpoints" / "last_model.pt")
-        if val_diag["loss"] < (best_val_loss - args.early_stopping_min_delta):
-            best_val_loss = val_diag["loss"]
-            best_epoch = epoch
-            epochs_without_improvement = 0
-            torch.save(checkpoint, output_dir / "checkpoints" / "best_model.pt")
+        if run_full_eval:
+            if val_diag["loss"] < (best_val_loss - args.early_stopping_min_delta):
+                best_val_loss = val_diag["loss"]
+                best_epoch = epoch
+                epochs_without_improvement = 0
+                torch.save(checkpoint, output_dir / "checkpoints" / "best_model.pt")
+            else:
+                epochs_without_improvement += 1
+            plot_training_curves(log_rows, output_dir / "plots")
         else:
-            epochs_without_improvement += 1
-
-        plot_training_curves(log_rows, output_dir / "plots")
+            next_eval = ((epoch // args.metrics_every) + 1) * args.metrics_every
+            print(f"Skipping full eval at epoch {epoch}; next full eval at epoch {next_eval}")
         print(
             f"epoch={epoch:04d}/{args.epochs} model={args.model_type} "
             f"train_loss={train_loss:.6f} val_loss={val_diag['loss']:.6f} "
+            f"train_road_loss={format_metric(row['train_road_loss'])} "
+            f"val_road_loss={format_metric(row['val_road_loss'])} "
             f"train_delta_ADE={format_metric(train_diag['ade'])} "
             f"val_delta_ADE={format_metric(val_diag['ade'])} "
             f"best_val_loss={best_val_loss:.6f} best_epoch={best_epoch}"
@@ -329,7 +723,7 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
             early_stopping_triggered = True
             print(
                 "Early stopping triggered after "
-                f"{epochs_without_improvement} epochs without validation improvement."
+                f"{epochs_without_improvement} full evaluation checks without validation improvement."
             )
             break
 
@@ -342,6 +736,9 @@ def train(args: argparse.Namespace, split_metadata: pd.DataFrame, device: torch.
             "early_stopping_triggered": early_stopping_triggered,
             "early_stopping_patience": args.early_stopping_patience,
             "early_stopping_min_delta": args.early_stopping_min_delta,
+            "early_stopping_unit": "full evaluation checks",
+            "metrics_every": args.metrics_every,
+            "full_eval_schedule": "epoch 1 and every metrics_every epochs",
         },
     )
 
@@ -364,14 +761,42 @@ def make_config(
             "head": "feature_dim -> 1024 -> 448 -> reshape[224,2]",
             "optimizer": "Adam",
             "scheduler": "none",
+            "checkpoint_selection": "best checkpoint selected only on full evaluation epochs",
+            "full_eval_schedule": "epoch 1 and every metrics_every epochs",
+            "early_stopping_unit": "full evaluation checks",
             "image_normalization": "[0, 1]",
             "label_normalization": "train_mean_std_delta_displacement_xy",
-            "loss": "MSELoss in normalized delta-displacement space",
+            "loss": (
+                "MSELoss in normalized delta-displacement space + lambda_road * differentiable road loss"
+                if args.use_road_loss
+                else "MSELoss in normalized delta-displacement space"
+            ),
+            "use_road_loss": args.use_road_loss,
+            "distance_field_dir": str(args.distance_field_dir) if args.distance_field_dir is not None else "none",
+            "distance_field_metadata": (
+                str(args.distance_field_metadata) if args.distance_field_metadata is not None else "none"
+            ),
+            "raw_to_osm_affine_json": str(args.raw_to_osm_affine_json),
+            "lambda_road": args.lambda_road,
+            "road_threshold_m": args.road_threshold_m,
+            "road_loss_mode": args.road_loss_mode,
+            "road_oob_weight": args.road_oob_weight,
+            "road_loss_description": (
+                "road loss samples differentiable distance fields at predicted integrated trajectory points"
+            ),
             "coordinate_space": "delta_displacement_xy",
             "integrated_absolute_evaluation": "oracle true start point",
             "input_representation": describe_input_representation(args.model_type),
             "map_crop_mode": infer_map_crop_mode(args.map_dir) if args.use_map else "none",
             "map_fusion_effective": args.map_fusion if args.use_map else "none",
+            "image_branch": "ResNet18 RGB GAF/MTF encoder" if args.model_type == "late_map_resnet18" else "none",
+            "map_branch": "small CNN map raster encoder" if args.model_type == "late_map_resnet18" else "none",
+            "fusion_level": "feature-level late fusion" if args.model_type == "late_map_resnet18" else "input-channel concat or none",
+            "fusion_reason": (
+                "GAF/MTF is timestep-timestep; map raster is spatial x-y; not pixel-aligned"
+                if args.model_type == "late_map_resnet18"
+                else "none"
+            ),
             "map_extent_metadata": str(extent_metadata_path(args.map_dir)) if args.use_map else "none",
             "trajectory_coordinate_frame": "raw local x/y from labels_absolute, not projected lon/lat",
             "map_coordinate_frame": "projected OSM CRS from extent metadata when --use-map is enabled",
@@ -418,11 +843,13 @@ def evaluate(
     truths_abs: dict[str, dict[str, np.ndarray]] = {}
     predictions_delta: dict[str, dict[str, np.ndarray]] = {}
     truths_delta: dict[str, dict[str, np.ndarray]] = {}
+    dataset_args = argparse.Namespace(**vars(args))
+    dataset_args.use_road_loss = False
 
     for split in ["train", "val", "test"]:
         split_frame = split_metadata[split_metadata["split"] == split].copy()
         loader = DataLoader(
-            make_dataset(args, data_root, split_frame, scaler),
+            make_dataset(dataset_args, data_root, split_frame, scaler),
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
@@ -436,7 +863,9 @@ def evaluate(
             split_rows,
             delta_timestep_ade,
             integrated_timestep_ade,
-        ) = predict_split(model, loader, scaler, device, pred_delta_dir, pred_absolute_dir, split, args.near_zero_eps)
+        ) = predict_split(
+            model, loader, scaler, device, pred_delta_dir, pred_absolute_dir, split, args.near_zero_eps, args
+        )
         predictions_delta[split] = split_pred_delta
         truths_delta[split] = split_true_delta
         predictions_abs[split] = split_pred_abs
@@ -494,6 +923,7 @@ def predict_split(
     pred_absolute_dir: Path,
     split: str,
     near_zero_eps: float,
+    args: argparse.Namespace,
 ) -> tuple[
     dict[str, np.ndarray],
     dict[str, np.ndarray],
@@ -514,8 +944,7 @@ def predict_split(
 
     with torch.no_grad():
         for batch in loader:
-            images = batch["image"].to(device, non_blocking=True)
-            pred_norm = model(images)
+            pred_norm = forward_batch(model, batch, device, args.use_map, args.map_fusion)
             pred_delta = scaler.inverse_transform_tensor(pred_norm).cpu().numpy().astype(np.float32)
             true_delta = batch["label_raw"].cpu().numpy().astype(np.float32)
             true_abs = batch["absolute"].cpu().numpy().astype(np.float32)
@@ -583,6 +1012,7 @@ def predict_split(
 def describe_input_representation(model_type: str) -> str:
     descriptions = {
         "raw_resnet18": "raw RGB [GASF,GADF,MTF] in [0,1]",
+        "late_map_resnet18": "late fusion of raw RGB [GASF,GADF,MTF] image features and grayscale OSM map raster features",
         "decomp_resnet18": "[R_sym,R_res,G_antisym,G_res,B_raw], with R/G converted to [-1,1]",
         "hard_resnet18": "[R_sym,G_antisym,B_raw], with R/G converted to [-1,1]",
         "decomp_mtf_local_resnet18": "[R_sym,R_res,G_antisym,G_res,B_raw,B_local]",
@@ -683,6 +1113,7 @@ def model_class_name(model_type: str) -> str:
 def conv1_input_channels(model_type: str) -> int:
     channels = {
         "raw_resnet18": 3,
+        "late_map_resnet18": 3,
         "decomp_resnet18": 5,
         "hard_resnet18": 3,
         "decomp_mtf_local_resnet18": 6,
@@ -700,6 +1131,11 @@ def write_week3_report(args: argparse.Namespace, summary: dict[str, object]) -> 
         "model": config["model"],
         "input_representation": config["input_representation"],
         "conv1_input_channels": config["conv1_input_channels"],
+        "map_fusion_effective": config.get("map_fusion_effective", "none"),
+        "image_branch": config.get("image_branch", "none"),
+        "map_branch": config.get("map_branch", "none"),
+        "fusion_level": config.get("fusion_level", "none"),
+        "fusion_reason": config.get("fusion_reason", "none"),
         "map_background_overlay_warning": config.get("map_background_overlay_warning", "none"),
         "best_epoch": best["best_epoch"],
         "best_val_loss": best["best_val_loss"],
@@ -729,6 +1165,11 @@ def write_week3_report(args: argparse.Namespace, summary: dict[str, object]) -> 
         f"- model: {report['model']}",
         f"- input_representation: {report['input_representation']}",
         f"- conv1_input_channels: {report['conv1_input_channels']}",
+        f"- map_fusion_effective: {report['map_fusion_effective']}",
+        f"- image_branch: {report['image_branch']}",
+        f"- map_branch: {report['map_branch']}",
+        f"- fusion_level: {report['fusion_level']}",
+        f"- fusion_reason: {report['fusion_reason']}",
         f"- map_background_overlay_warning: {report['map_background_overlay_warning']}",
         f"- best_epoch: {report['best_epoch']}",
         f"- best_val_loss: {report['best_val_loss']}",

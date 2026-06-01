@@ -37,13 +37,16 @@ for import_dir in (SRC_DIR, SCRIPTS_DIR):
 
 from cnr_trajectory.data.image_dataset import DiffusionImageDataset
 from train_ddpm import (
+    apply_channel_normalization,
     build_unet,
     compute_loss_components,
+    load_channel_norm_stats,
     load_checkpoint,
     resolve_diag_targets,
     save_checkpoint,
     save_samples,
     set_seed,
+    standardize_diag_targets_if_needed,
 )
 
 
@@ -101,6 +104,7 @@ def main() -> None:
         "mse_loss": 0.0,
         "symmetry_loss": 0.0,
         "diag_loss": 0.0,
+        "mtf_symmetry_loss": 0.0,
     }
     steps_since_log = 0
     batches = cycle(dataloader)
@@ -109,6 +113,7 @@ def main() -> None:
     while global_step < args.max_train_steps:
         for _ in range(args.gradient_accumulation_steps):
             clean_images = next(batches).to(device)
+            clean_images = apply_channel_normalization(clean_images, args)
             noise = torch.randn_like(clean_images)
             timesteps = torch.randint(
                 0,
@@ -155,11 +160,13 @@ def main() -> None:
                 "mse_loss": avg_components["mse_loss"],
                 "symmetry_loss": avg_components["symmetry_loss"],
                 "diag_loss": avg_components["diag_loss"],
+                "mtf_symmetry_loss": avg_components["mtf_symmetry_loss"],
                 "aux_loss_mode": args.aux_loss_mode,
                 "diag_targets": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
                 "diag_target_rgb": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
                 "diag_weight": args.diag_weight,
                 "symmetry_weight": args.symmetry_weight,
+                "mtf_symmetry_weight": args.mtf_symmetry_weight,
                 "lr": lr_scheduler.get_last_lr()[0],
                 "elapsed_seconds": elapsed,
                 "steps_per_second": global_step / elapsed if elapsed > 0 else None,
@@ -202,6 +209,7 @@ def main() -> None:
                 "aux_loss_mode": args.aux_loss_mode,
                 "symmetry_weight": args.symmetry_weight,
                 "diag_weight": args.diag_weight,
+                "mtf_symmetry_weight": args.mtf_symmetry_weight,
                 "disable_symmetry_loss": args.disable_symmetry_loss,
                 "diag_targets": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
                 "diag_target_rgb": diag_targets.detach().cpu().tolist() if diag_targets is not None else None,
@@ -209,6 +217,9 @@ def main() -> None:
                 "diag_target_num_images": diag_target_info["num_images"],
                 "diag_target_file": str(args.diag_target_file) if args.diag_target_file is not None else None,
                 "split_metadata": str(args.split_metadata) if args.split_metadata is not None else None,
+                "channel_normalization_mode": args.channel_normalization_mode,
+                "channel_norm_stats": args.channel_norm_stats_payload,
+                "channel_norm_stats_file": str(args.channel_norm_stats) if args.channel_norm_stats is not None else None,
                 "scratch_root": str(args.scratch_root) if args.scratch_root is not None else None,
                 "run_name": args.run_name,
                 "output_dir": str(output_dir),
@@ -238,7 +249,7 @@ def resolve_output_dir(args: argparse.Namespace) -> Path:
 
 
 def resolve_diag_targets_for_scratch(dataset: DiffusionImageDataset, args: argparse.Namespace) -> dict[str, object]:
-    if args.aux_loss_mode != "data_driven_diag" or args.diag_target_file is None:
+    if args.aux_loss_mode not in ("data_driven_diag", "data_driven_diag_mtf_symmetry") or args.diag_target_file is None:
         return resolve_diag_targets(dataset, args)
 
     diag_target_file = args.diag_target_file.expanduser().resolve()
@@ -256,6 +267,7 @@ def resolve_diag_targets_for_scratch(dataset: DiffusionImageDataset, args: argpa
         targets = torch.tensor([float(value) for value in values], dtype=torch.float32)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"diag_targets must contain numeric RGB values: {diag_target_file}") from exc
+    targets = standardize_diag_targets_if_needed(targets, args)
 
     args.diag_target_file = diag_target_file
     return {
@@ -311,6 +323,7 @@ def print_startup_diagnostics(args: argparse.Namespace, dataset: DiffusionImageD
         "diag_target_file",
         "symmetry_weight",
         "diag_weight",
+        "mtf_symmetry_weight",
         "disable_symmetry_loss",
         "resume_from_checkpoint",
         "seed",
@@ -325,6 +338,8 @@ def print_startup_diagnostics(args: argparse.Namespace, dataset: DiffusionImageD
         "scratch_root",
         "copy_results_to_home",
         "home_results_dir",
+        "channel_normalization_mode",
+        "channel_norm_stats",
     ):
         print(f"  {name}: {getattr(args, name)}")
     print("", flush=True)
@@ -372,7 +387,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-ema", action="store_true", help="Track and save exponential moving average weights.")
     parser.add_argument(
         "--aux-loss-mode",
-        choices=("notebook", "none", "data_driven_diag"),
+        choices=("notebook", "none", "data_driven_diag", "mtf_symmetry", "data_driven_diag_mtf_symmetry"),
         default="notebook",
         help="Auxiliary structure loss mode. Defaults to the original notebook-style loss.",
     )
@@ -390,6 +405,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--symmetry-weight", type=float, default=0.01, help="Weight for notebook channel-0 symmetry loss.")
     parser.add_argument("--diag-weight", type=float, default=0.01, help="Weight for diagonal auxiliary loss.")
+    parser.add_argument("--mtf-symmetry-weight", type=float, default=0.01, help="Weight for MTF/B-channel symmetry loss.")
     parser.add_argument(
         "--disable-symmetry-loss",
         action="store_true",
@@ -417,7 +433,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional explicit destination for --copy-results-to-home.",
     )
-    return parser.parse_args()
+    parser.add_argument("--channel-norm-stats", type=Path, default=None, help="JSON file with per-channel mean/std in [-1, 1].")
+    parser.add_argument(
+        "--channel-normalization-mode",
+        choices=("none", "standardize"),
+        default="none",
+        help="Optionally train DDPM in channel-wise standardized space.",
+    )
+    args = parser.parse_args()
+    load_channel_norm_stats(args)
+    return args
 
 
 if __name__ == "__main__":

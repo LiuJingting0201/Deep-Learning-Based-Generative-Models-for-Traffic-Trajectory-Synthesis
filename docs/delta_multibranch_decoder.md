@@ -27,6 +27,30 @@ Single-channel ablations use `--channels r`, `--channels g`, or `--channels b` a
 - `small_gap`: old compact encoder, with `AdaptiveAvgPool2d((1, 1))`.
 - `small_spatial`: stronger default encoder, with `AdaptiveAvgPool2d((4, 4))` before flattening and projection.
 
+## Mid-fusion Decoder
+
+The current ablation set compares three fusion strategies:
+
+- `simple_cnn_delta`: early fusion. The RGB pseudo-modal channels are stacked at the input and mixed by the first convolution.
+- `multi_branch_delta`: late fusion. GASF/GADF/MTF are encoded independently all the way to vectors, then concatenated before the MLP head.
+- `mid_fusion_delta`: shallow channel-specific stems followed by spatial feature-map fusion.
+
+`mid_fusion_delta` directly tests whether pseudo-modal GAF channels benefit from controlled intermediate fusion. It applies separate shallow stems to R/G/B (`R=GASF`, `G=GADF`, `B=MTF`), concatenates the resulting `[B, 64, 56, 56]` feature maps into `[B, 192, 56, 56]`, and then uses a shared fusion CNN and MLP regression head.
+
+Submit mid-fusion ablations:
+
+```bash
+sbatch --export=ALL,DELTA_TASK_ID=1 slurm/run_delta_midfusion_ablation.slurm
+sbatch --export=ALL,DELTA_TASK_ID=2 slurm/run_delta_midfusion_ablation.slurm
+sbatch --export=ALL,DELTA_TASK_ID=3 slurm/run_delta_midfusion_ablation.slurm
+```
+
+Task mapping:
+
+- `1`: `mid_fusion_delta`, RGB, beta `0.05`
+- `2`: `mid_fusion_delta`, RGB, beta `0.2`
+- `3`: `mid_fusion_delta`, RGB, beta `0.05`, normalized target
+
 ## Loss Formula
 
 Without target normalization:

@@ -2,6 +2,210 @@
 
 Generated on 2026-05-16 from the current `week2` working tree.
 
+## Workspace Evidence Audit Update
+
+This update was prepared by inspecting the current workspace on 2026-05-20. The active progress report is this file, `docs/week2_progress_and_plan.md`. Its existing structure is: repository hygiene notes, implemented DDPM/HPC progress, pixel-space DDPM evaluations, channel diagnostics, ChannelNorm, MTFSym, DDIM, Hybrid V2 decoder notes, and delta-displacement multi-branch decoder workflow notes. The sections below summarize the concrete artifacts found in `scripts/`, `src/`, `tests/`, `logs/`, `results/`, `results_hpc/`, `data_latent_delta_224*`, and `slurm/`.
+
+### Executive Summary
+
+- Completed 50k pixel-space DDPM evidence exists for raw PureMSE, raw DataDrivenDiag, ChannelNorm PureMSE/DataDrivenDiag, and MTFSym PureMSE/DataDrivenDiag. Each 50k run has `train_summary.json`, `train_log.jsonl`, checkpoint folders through `checkpoint-50000`, and `checkpoint-final`.
+- Matched image-level evaluation exists for 50-step, 150-step, DDIM 150-step, ChannelNorm, and MTFSym sampling. Metrics are FID plus image/channel diagnostics; no KID files were found for these latest 50k comparisons.
+- The strongest current image-level FID among the audited 150-step pixel-space results is raw PureMSE DDPM at `74.62`, from `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv`.
+- ChannelNorm improves RGB/channel mean distance but worsens FID. MTFSym improves the targeted MTF/B symmetry metric but worsens FID and B-channel marginal statistics.
+- Latent diffusion artifacts exist for a 14x14 latent baseline, a normalized 14x14 latent run, and a 28x28 latent run. They include generated PNGs and train summaries, but no FID/KID or channel-diagnostic result files were found in the current workspace.
+- Decoder evidence is richer than the older notes: Hybrid V2 and V3 geometry runs have completed metrics; centroid-correction runs have completed metrics; multi-branch delta decoder beta `0.0`, `0.05`, and local `0.2` results exist.
+- No quantitative map-matching output, HTML map output, or map-adherence metric was found. Only reusable map-matching wrapper code and smoke tests are present.
+
+### Experiment Inventory Table
+
+| Experiment family | Run name / output path | Script or command evidence | Checkpoint / sample count | Main metrics available | Evidence file | Status |
+|---|---|---|---|---|---|---|
+| Raw pixel DDPM | `results_hpc/ddpm_scratch_50000step_bs8_pureMSE` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_pureMSE.slurm`, `scripts/train_ddpm_scratch.py` | checkpoints every 2500 steps through `checkpoint-50000`; 80 matched 150-step PNGs under nested `samples_150steps/checkpoint-*` | FID `74.62`, RGB mean `[0.0137, 0.0033, -0.0719]`, MTF/B sym `0.2715` | `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv`, `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| Raw pixel DDPM | `results_hpc/ddpm_scratch_50000step_bs8_dataDrivenDiag_precomputed` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_dataDrivenDiag_precomputed.slurm` | checkpoints through `checkpoint-50000`; 80 matched 150-step PNGs | FID `81.03`, RGB mean `[0.1939, -0.0365, -0.2593]`, MTF/B sym `0.2280` | `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| Sampling-step ablation | raw PureMSE/DataDrivenDiag 50 vs 150 steps | `scripts/slurm/generate_ddpm_50k_50step_matched_ablation.slurm`, `scripts/slurm/generate_ddpm_50k_150step_ablation.slurm` | `checkpoint-25000` and `checkpoint-50000`, 40 samples each, 80 per method/setting | PureMSE FID `78.03 -> 74.62`; DataDrivenDiag FID `93.93 -> 81.03` | `results_hpc/ddpm_50k_sampling_steps_50_matched_analysis/metrics_summary.csv`, `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| ChannelNorm DDPM | `results_hpc/ddpm_scratch_50000step_bs8_channelNorm_pureMSE` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_channelNorm_pureMSE.slurm` | checkpoints through `checkpoint-50000`; 80 matched 150-step PNGs | FID `130.62`, RGB-mean L2 `0.0998`, MTF/B sym `0.3368` | `results_hpc/channelNorm_50k_sampling_steps_150_analysis/metrics_summary.csv`, `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| ChannelNorm DDPM | `results_hpc/ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_channelNorm_dataDrivenDiag_precomputed.slurm` | checkpoints through `checkpoint-50000`; 80 matched 150-step PNGs | FID `137.00`, RGB-mean L2 `0.1183`, corr(GASF,MTF) `-0.1537`, MTF/B sym `0.3932` | `results_hpc/channelNorm_50k_sampling_steps_150_analysis/metrics_summary.csv`, `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| MTFSym DDPM | `results_hpc/ddpm_scratch_50000step_bs8_mtfSym_pureMSE` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_mtfSym_pureMSE.slurm` | checkpoints through `checkpoint-50000`; 80 matched 150-step PNGs | FID `84.98`, MTF/B sym `0.1207`, B saturation `0.4423` | `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| MTFSym DDPM | `results_hpc/ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed` | `scripts/slurm/train_ddpm_scratch_50000step_bs8_mtfSym_dataDrivenDiag_precomputed.slurm` | checkpoints through `checkpoint-50000`; 80 matched 150-step PNGs | FID `93.96`, MTF/B sym `0.1124`, B saturation `0.3866` | `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv` | Complete image-level eval |
+| DDIM sampling | raw PureMSE/DataDrivenDiag DDIM 150-step | `scripts/slurm/generate_ddim_150step_ablation_samples.slurm`, `scripts/generate_ddpm_samples.py --scheduler ddim` | `checkpoint-25000` and `checkpoint-50000`, 80 PNGs per method | PureMSE DDIM FID `93.41`; DataDrivenDiag DDIM FID `98.71` | `results_hpc/ddim_150step_ablation_analysis/metrics_summary.csv` | Complete image-level eval |
+| Latent autoencoder | `results_hpc/gaf_autoencoder_delta_224_latent28` | `scripts/train_autoencoder.py`, `slurm/train_autoencoder.sbatch` | 50 epochs; recon samples every 10 epochs | reconstruction MAE `0.03922`, MSE `0.00642` | `results_hpc/gaf_autoencoder_delta_224_latent28/train_summary.json` | Complete AE training/eval |
+| Latent DDPM | `results_hpc/latent_ddpm_delta_224_latent28` | `scripts/train_latent_ddpm.py`, `scripts/generate_latent_samples.py`, `slurm/train_latent_ddpm.sbatch` | 50k steps; 32 best and 32 final generated PNGs | best rolling loss `0.06112`; no FID/KID found | `results_hpc/latent_ddpm_delta_224_latent28/train_summary.json` | Complete training; image metrics missing |
+| Hybrid V2 decoder | `results_hpc/hybrid_multitask_delta_decoder_v2` | `scripts/run_hybrid_multitask_delta_decoder_v2.py`, `scripts/slurm/train_hybrid_multitask_delta_decoder_v2.slurm` | best checkpoint and evaluation files present | test integrated ADE `107.85`, FDE `147.20`; oracle-start ADE `158.46` | `results_hpc/hybrid_multitask_delta_decoder_v2/evaluation/metrics_summary.json` | Complete |
+| Hybrid V3 geometry | `results_hpc/hybrid_multitask_delta_decoder_v3_geometry_mild` | `scripts/run_hybrid_multitask_delta_decoder_v3_geometry.py`, `scripts/slurm/run_hybrid_v3_geometry_mild.slurm` | best checkpoint and evaluation files present | test integrated ADE `124.95`, FDE `164.06` | `results_hpc/hybrid_multitask_delta_decoder_v3_geometry_mild/evaluation/metrics_summary.json` | Complete; worse than V2 on ADE/FDE |
+| Hybrid V3 geometry | `results_hpc/hybrid_multitask_delta_decoder_v3_geometry_strong` | `scripts/slurm/run_hybrid_v3_geometry_strong.slurm` | best checkpoint and evaluation files present | test integrated ADE `132.31`, FDE `184.92` | `results_hpc/hybrid_multitask_delta_decoder_v3_geometry_strong/evaluation/metrics_summary.json` | Complete; worse than V2 on ADE/FDE |
+| Centroid-correction decoder | `results_hpc/delta_centroid_correction_decoder_lc005/lc010/lc020` | `scripts/run_delta_centroid_correction_decoder_ablation.py`, `scripts/slurm/train_delta_centroid_correction_decoder_lc*.slurm` | best checkpoint and evaluation files present | learned centroid corrected ADE `226.84`, `215.63`, `209.84`; all worse than their oracle correction target | `results_hpc/delta_centroid_correction_decoder_lc*/evaluation/metrics_summary.json` | Complete |
+| Multi-branch delta decoder | `results_hpc/decoder_multibranch_delta_beta0`, `results_hpc/decoder_multibranch_delta_beta005`, `results/decoder_multibranch_delta` | `scripts/train_delta_displacement_decoder.py`, `slurm/run_delta_multibranch_ablation.slurm` | 100 epochs each; best epochs `94`, `89`, `96` | test raw ADE `208.27`, `162.92`, `153.43` for beta `0.0`, `0.05`, `0.2` | `metrics_test.json`, `config.json`, `train_log.jsonl` in each run dir | Partially complete ablation; normalized/channel tasks not found |
+| Map matching | none found | `src/cnr_trajectory/reconstruction/map_matching.py`, `scripts/reconstruct_trajectories.py`, `tests/test_map_matching_smoke.py` | no matched outputs found | no before/after map metrics found | code and smoke test only | Not yet quantitatively evaluated |
+
+### DDPM Generation Results
+
+Raw 50k pixel-space DDPM runs are present for:
+
+- `results_hpc/ddpm_scratch_50000step_bs8_pureMSE`
+- `results_hpc/ddpm_scratch_50000step_bs8_dataDrivenDiag_precomputed`
+
+Both have `global_step=50000`, `num_images=3159`, and `image_size=224` in `train_summary.json`. The DataDrivenDiag run records `diag_target_rgb=[-0.3689744770526886, 0.003921627998352051, 0.7749511003494263]` from `2527` train images.
+
+Matched 150-step results from `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv`:
+
+| Method | n | FID | RGB mean | Diagonal RGB mean | Symmetry | Edge |
+|---|---:|---:|---|---|---:|---:|
+| PureMSE | 80 | `74.62` | `[0.0137, 0.0033, -0.0719]` | `[0.0000, 0.0048, 0.6732]` | `0.2738` | `0.1465` |
+| DataDrivenDiag | 80 | `81.03` | `[0.1939, -0.0365, -0.2593]` | `[0.1569, -0.0326, 0.6313]` | `0.2892` | `0.1519` |
+
+Sampling-step evidence from `results_hpc/ddpm_50k_sampling_steps_50_matched_analysis/metrics_summary.csv` and `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv`:
+
+| Method | 50-step FID | 150-step FID | Supported observation |
+|---|---:|---:|---|
+| PureMSE | `78.03` | `74.62` | 150 steps improved FID for this matched 80-image protocol. |
+| DataDrivenDiag | `93.93` | `81.03` | 150 steps improved FID for this matched 80-image protocol. |
+
+ChannelNorm 150-step evidence from `results_hpc/channelNorm_50k_sampling_steps_150_analysis/metrics_summary.csv`:
+
+| Method | n | FID | RGB mean | RGB-mean L2 to real/train reference in later summary | Symmetry | Edge |
+|---|---:|---:|---|---:|---:|---:|
+| ChannelNorm PureMSE | 80 | `130.62` | `[-0.3716, 0.0731, -0.1230]` | `0.0998` | `0.1808` | `0.1374` |
+| ChannelNorm DataDrivenDiag | 80 | `137.00` | `[-0.3078, -0.0390, -0.2729]` | `0.1183` | `0.2075` | `0.1437` |
+
+Supported conclusion: ChannelNorm moved RGB/channel means closer to the real/train distribution but worsened FID relative to raw 150-step DDPM. This is supported by `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv`, where raw PureMSE/DataDrivenDiag FIDs are `74.62`/`81.03` and ChannelNorm FIDs are `130.62`/`137.00`.
+
+MTFSym 150-step evidence from `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv`:
+
+| Method | n | FID | RGB mean | MTF/B symmetry | corr(GASF,MTF) | B saturation |
+|---|---:|---:|---|---:|---:|---:|
+| raw PureMSE | 80 | `74.62` | `[0.0137, 0.0033, -0.0719]` | `0.2715` | `-0.0682` | `0.0770` |
+| raw DataDrivenDiag | 80 | `81.03` | `[0.1939, -0.0365, -0.2593]` | `0.2280` | `-0.0942` | `0.0964` |
+| MTFSym PureMSE | 80 | `84.98` | `[0.1147, 0.0068, -0.7060]` | `0.1207` | `0.0670` | `0.4423` |
+| MTFSym DataDrivenDiag | 80 | `93.96` | `[0.2198, 0.0478, -0.7119]` | `0.1124` | `0.0250` | `0.3866` |
+
+Supported conclusion: MTFSym improved the targeted MTF/B symmetry metric but worsened FID and shifted B/MTF statistics strongly negative with higher B-channel saturation.
+
+DDIM evidence from `results_hpc/ddim_150step_ablation_analysis/metrics_summary.csv`:
+
+| Method | Sampler | n | FID | MTF/B symmetry | Edge |
+|---|---|---:|---:|---:|---:|
+| PureMSE | DDPM | 80 | `74.62` | `0.2715` | `0.1465` |
+| PureMSE | DDIM | 80 | `93.41` | `0.3567` | `0.1605` |
+| DataDrivenDiag | DDPM | 80 | `81.03` | `0.2280` | `0.1519` |
+| DataDrivenDiag | DDIM | 80 | `98.71` | `0.3447` | `0.1745` |
+
+Supported conclusion: DDIM with `eta=0.0` and 150 reverse steps did not improve the main image-level metric for these runs.
+
+Latent diffusion evidence:
+
+- Autoencoder `results_hpc/gaf_autoencoder_delta_224_latent28`: `epochs=50`, `latent_shape_chw=[32,28,28]`, reconstruction MAE `0.039218996950455824`, MSE `0.006421159925804047`.
+- Latent data `data_latent_delta_224/latent`: `3159` `.npy` files, first latent shape recorded in log as `(16, 14, 14)`.
+- Latent data `data_latent_delta_224_latent28/latent`: `3159` `.npy` files, first latent shape recorded in `logs/slurm/encode_latents_1721190.out` as `(32, 28, 28)`.
+- Latent DDPM `results_hpc/latent_ddpm_delta_224_v2`: `global_step=50000`, `sample_size=14`, `latent_channels=16`, best rolling loss `0.07597230281680822`, 32 best and 32 final generated PNGs.
+- Latent DDPM `results_hpc/latent_ddpm_delta_224_latent28`: `global_step=50000`, `sample_size=28`, `latent_channels=32`, best rolling loss `0.06112204110249877`, 32 best and 32 final generated PNGs.
+- Missing: no FID/KID/channel-diagnostic files were found for latent generated PNGs, so "worse than pixel-space DDPM" is not quantitatively verified in the current workspace.
+
+### Channel Diagnostics
+
+Real channel statistics from `results_hpc/channel_diagnostics/channel_stats.csv`:
+
+| Channel | Mean | Std | q01 | q50 | q99 |
+|---|---:|---:|---:|---:|---:|
+| GASF/R | `-0.3830` | `0.4845` | `-1.0000` | `-0.5137` | `0.9216` |
+| GADF/G | `0.0004` | `0.4361` | `-0.9608` | `0.0039` | `0.9608` |
+| MTF/B | `-0.1905` | `0.8526` | `-1.0000` | `-0.7882` | `0.9608` |
+
+Six-way MTF/B findings from `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv`:
+
+- Real MTF/B symmetry is `0.0673`.
+- Raw PureMSE MTF/B symmetry is `0.2715`; raw DataDrivenDiag is `0.2280`.
+- ChannelNorm PureMSE/DataDrivenDiag are worse on MTF/B symmetry: `0.3368` and `0.3932`.
+- MTFSym PureMSE/DataDrivenDiag improve MTF/B symmetry to `0.1207` and `0.1124`.
+- MTFSym also pushes B means to about `-0.7060` and `-0.7119` and B saturation to `0.4423` and `0.3866`, compared with real B saturation `0.1516`.
+
+Evidence-backed interpretation: the B/MTF symmetry objective is controllable, but the current MTFSym objective does not preserve B/MTF marginal statistics or improve FID.
+
+### Decoder / Reconstruction Results
+
+Completed decoder experiments found:
+
+| Decoder | Path | Labels / targets | Test metrics | Evidence |
+|---|---|---|---|---|
+| Hybrid V2 multi-head ResNet18 | `results_hpc/hybrid_multitask_delta_decoder_v2` | delta `[224,2]`, start `[2]`, centroid `[2]`; centroid auxiliary only | integrated ADE `107.85`, FDE `147.20`; oracle-start ADE `158.46`, FDE `211.48` | `evaluation/metrics_summary.json`, `evaluation/oracle_vs_learned_start_summary.json` |
+| Hybrid V3 geometry mild | `results_hpc/hybrid_multitask_delta_decoder_v3_geometry_mild` | V2 targets plus heading/turn losses | integrated ADE `124.95`, FDE `164.06`; oracle-start ADE `173.09`, FDE `231.79` | `evaluation/metrics_summary.json`, `config.json` |
+| Hybrid V3 geometry strong | `results_hpc/hybrid_multitask_delta_decoder_v3_geometry_strong` | stronger heading/turn loss | integrated ADE `132.31`, FDE `184.92`; oracle-start ADE `185.00`, FDE `264.68` | `evaluation/metrics_summary.json`, `config.json` |
+| Delta centroid correction lc005 | `results_hpc/delta_centroid_correction_decoder_lc005` | delta plus centroid correction | GT centroid corrected ADE `99.44`; learned corrected ADE `226.84` | `evaluation/metrics_summary.json` |
+| Delta centroid correction lc010 | `results_hpc/delta_centroid_correction_decoder_lc010` | delta plus centroid correction | GT centroid corrected ADE `99.64`; learned corrected ADE `215.63` | `evaluation/metrics_summary.json` |
+| Delta centroid correction lc020 | `results_hpc/delta_centroid_correction_decoder_lc020` | delta plus centroid correction | GT centroid corrected ADE `104.81`; learned corrected ADE `209.84` | `evaluation/metrics_summary.json` |
+| Multi-branch delta beta 0.0 | `results_hpc/decoder_multibranch_delta_beta0` | physical unnormalized delta displacement | raw ADE `208.27`, raw FDE `356.35`, delta ADE `6.59` | `metrics_test.json`, `config.json` |
+| Multi-branch delta beta 0.05 | `results_hpc/decoder_multibranch_delta_beta005` | physical unnormalized delta displacement plus integrated loss beta `0.05` | raw ADE `162.92`, raw FDE `257.63`, delta ADE `7.88` | `metrics_test.json`, `config.json` |
+| Multi-branch delta beta 0.2 local | `results/decoder_multibranch_delta` | physical unnormalized delta displacement plus integrated loss beta `0.2` | raw ADE `153.43`, raw FDE `249.62`, delta ADE `7.83` | `metrics_test.json`, `config.json` |
+
+Supported conclusions:
+
+- Hybrid V2 remains the best completed Hybrid multi-head run by test integrated ADE/FDE among V2, V3 mild, and V3 strong. Supported by the three `evaluation/metrics_summary.json` files.
+- Learned start still outperforms oracle start in Hybrid V2/V3 aggregate metrics. For V2 test, learned-start ADE is `107.85` vs oracle-start ADE `158.46`, from `oracle_vs_learned_start_summary.json`.
+- The V3 geometry losses are implemented and completed, not merely proposed. They did not improve ADE/FDE over V2 in the available metrics. No heading-error, turn-angle, sharp-turn recall, or sharp-turn precision keys were found in the V3 `metrics_summary.json` files, so geometry-specific evaluation is still missing even though geometry losses were trained.
+- Centroid-correction runs show that oracle centroid correction can be strong, but learned centroid correction is not yet reliable. This is supported by learned corrected ADE values above `209` vs GT centroid corrected ADE around `99-105`.
+- Multi-branch delta decoder beta runs are partially complete. Results for beta `0.0`, `0.05`, and local beta `0.2` exist. Normalized-target tasks and channel-ablation tasks referenced by scripts were not found as completed result folders in the current workspace.
+
+Prepared or implemented decoder code found:
+
+- `src/cnr_trajectory/reconstruction/delta_displacement.py`
+- `scripts/train_delta_displacement_decoder.py`
+- `scripts/train_multi_branch_delta_decoder.py`
+- `scripts/run_hybrid_multitask_delta_decoder.py`
+- `scripts/run_hybrid_multitask_delta_decoder_v2.py`
+- `scripts/run_hybrid_multitask_delta_decoder_v3_geometry.py`
+- `scripts/run_delta_centroid_correction_decoder_ablation.py`
+- `tests/test_delta_displacement_decoder_smoke.py`
+
+### Map Matching Results
+
+Code exists:
+
+- `src/cnr_trajectory/reconstruction/map_matching.py`
+- `scripts/reconstruct_trajectories.py`
+- `tests/test_map_matching_smoke.py`
+- `requirements-mapmatching.txt`
+
+Output evidence not found:
+
+- No matched trajectory output directory was found by searching for map/match/HTML/adherence artifacts.
+- No before/after distance table, road-validity score, off-road metric, or quantitative map-adherence metric was found.
+- No Folium/HTML map output was found.
+
+Conclusion: map matching is implemented as reusable wrapper/smoke-tested code, but current workspace evidence does not support claims about map matching improving road validity or changing GT distance.
+
+### Evidence-backed Conclusions
+
+- Raw PureMSE DDPM is the strongest current 150-step pixel-space image baseline by FID among audited runs. Supported by `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv` and `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv`.
+- Increasing DDPM reverse steps from 50 to 150 improved FID for raw PureMSE and raw DataDrivenDiag under matched 80-image sampling. Supported by `results_hpc/ddpm_50k_sampling_steps_50_matched_analysis/metrics_summary.csv` and `results_hpc/ddpm_50k_sampling_steps_150_analysis/metrics_summary.csv`.
+- ChannelNorm corrected marginal channel means but worsened FID. Supported by `results_hpc/channelNorm_50k_sampling_steps_150_analysis/metrics_summary.csv`.
+- MTFSym improved the targeted B/MTF symmetry metric but worsened FID and B-channel saturation/mean. Supported by `results_hpc/mtfSym_50k_sampling_steps_150_analysis/metrics_summary.csv`.
+- DDIM 150-step sampling worsened FID and MTF/B symmetry relative to DDPM 150-step for both raw runs. Supported by `results_hpc/ddim_150step_ablation_analysis/metrics_summary.csv`.
+- Latent diffusion has completed training artifacts and generated samples, but no workspace FID/KID/channel metrics were found. Therefore relative quality versus pixel-space DDPM is not verified by metrics in the current workspace.
+- Hybrid V2 is currently better than the completed Hybrid V3 geometry runs on ADE/FDE. Supported by `results_hpc/hybrid_multitask_delta_decoder*_*/evaluation/metrics_summary.json`.
+- Generated DDPM samples have not been decoded into trajectories in the audited result folders. No trajectory-level ADE/FDE or map-compliance results for generated DDPM outputs were found.
+
+### Missing Data / Gaps
+
+- No KID result files were found for the latest 50k DDPM comparisons.
+- No trajectory-level evaluation was found for generated DDPM samples.
+- No decoder metrics were found for generated DDPM images; decoder evaluations found here use real paired GAF images.
+- No quantitative map-matching or map-adherence results were found.
+- No latent diffusion FID/KID/channel diagnostics were found, despite completed latent DDPM training and generated PNG samples.
+- No geometry-specific evaluation metrics were found for Hybrid V3 outputs, despite V3 training with heading/turn losses.
+- Normalized-target multi-branch delta decoder runs and channel-ablation decoder runs were prepared in scripts, but completed result folders were not found in the current workspace.
+- The image-level DDPM comparisons use only 80 generated samples per condition for matched evaluations, so FID remains exploratory.
+
+### Prioritized Next Experiments
+
+1. Evaluate latent DDPM generated PNGs with the same image/channel diagnostic scripts used for pixel-space DDPM, because generated latent samples exist but metrics are missing.
+2. Decode matched raw PureMSE and DataDrivenDiag 150-step generated samples through the best available real-image decoder, then report ADE/FDE and failure cases separately from image FID.
+3. Add geometry-specific evaluation for Hybrid V3 outputs: heading error, turn-angle error, sharp-turn recall, sharp-turn precision, and curvature or turn distribution summaries.
+4. Finish or verify the prepared normalized-target and channel-ablation multi-branch decoder jobs before interpreting the beta ablation as complete.
+5. If map matching is needed for the report, produce quantitative before/after outputs from `scripts/reconstruct_trajectories.py` and the map-matching wrapper rather than relying on code presence.
+
+## Historical Detailed Notes
+
+The detailed notes below were already present in the report and are preserved for traceability. The audit section above should be treated as the current evidence-first summary.
+
 ## Repository State
 
 - Current branch: `week2`.
