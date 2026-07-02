@@ -36,7 +36,10 @@ def main() -> None:
     print(f"seed={args.seed}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_dir = checkpoint_dir / "unet"
+    model_dir = checkpoint_dir / "ema_unet" if args.use_ema and (checkpoint_dir / "ema_unet").exists() else checkpoint_dir / "unet"
+    if args.use_ema and model_dir.name != "ema_unet":
+        print(f"WARNING: --use-ema requested but {checkpoint_dir / 'ema_unet'} is missing; using unet.")
+    print(f"model-dir={model_dir}")
 
     model = UNet2DModel.from_pretrained(model_dir)
     if int(model.config.sample_size) != args.image_size:

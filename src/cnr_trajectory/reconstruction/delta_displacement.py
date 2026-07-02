@@ -174,6 +174,64 @@ class MultiBranchDeltaDecoder(nn.Module):
         return delta.view(-1, self.sequence_length, 2)
 
 
+class MidFusionDeltaDecoder(nn.Module):
+    """Shallow pseudo-modal stems followed by spatial feature-map fusion."""
+
+    def __init__(
+        self,
+        sequence_length: int = 224,
+        hidden_dim: int = 1024,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
+        self.sequence_length = sequence_length
+        # R=GASF, G=GADF, B=MTF. These pseudo-modal encodings get separate
+        # shallow stems before spatial feature maps are fused.
+        self.stem_r = self._make_stem()
+        self.stem_g = self._make_stem()
+        self.stem_b = self._make_stem()
+        self.fusion = nn.Sequential(
+            nn.Conv2d(192, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Flatten(),
+        )
+        self.head = nn.Sequential(
+            nn.Linear(256 * 4 * 4, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, sequence_length * 2),
+        )
+
+    @staticmethod
+    def _make_stem() -> nn.Sequential:
+        return nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        if image.shape[1] != 3:
+            raise ValueError(f"MidFusionDeltaDecoder expects 3 pseudo-modal channels, got {image.shape[1]}")
+        feature_r = self.stem_r(image[:, 0:1])
+        feature_g = self.stem_g(image[:, 1:2])
+        feature_b = self.stem_b(image[:, 2:3])
+        features = torch.cat([feature_r, feature_g, feature_b], dim=1)
+        delta = self.head(self.fusion(features))
+        return delta.view(-1, self.sequence_length, 2)
+
+
 class SimpleCNNDeltaDecoder(nn.Module):
     """Single-stream CNN baseline for ablations on the same delta target."""
 
@@ -247,6 +305,13 @@ def build_delta_decoder(
             sequence_length=sequence_length,
             dropout=dropout,
             encoder_type=encoder_type,
+        )
+    if model_name == "mid_fusion_delta":
+        if channels != "rgb":
+            raise ValueError("mid_fusion_delta only supports channels='rgb'")
+        return MidFusionDeltaDecoder(
+            sequence_length=sequence_length,
+            dropout=dropout,
         )
     raise ValueError(f"Unsupported model: {model_name}")
 

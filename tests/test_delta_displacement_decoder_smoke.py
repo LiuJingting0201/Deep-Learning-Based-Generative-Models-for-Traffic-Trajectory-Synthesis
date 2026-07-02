@@ -17,7 +17,9 @@ if str(SRC_ROOT) not in sys.path:
 
 from cnr_trajectory.reconstruction.delta_displacement import (  # noqa: E402
     DeltaDisplacementPairedDataset,
+    MidFusionDeltaDecoder,
     MultiBranchDeltaDecoder,
+    build_delta_decoder,
     integrate_delta_torch,
 )
 
@@ -118,3 +120,20 @@ def test_multibranch_shapes_and_delta_zero_convention() -> None:
     torch.testing.assert_close(absolute[:, 0, :], start_xy)
     expected_tail = start_xy[:, None, :] + torch.cumsum(delta[:, 1:, :], dim=1)
     torch.testing.assert_close(absolute[:, 1:, :], expected_tail)
+
+
+def test_mid_fusion_decoder_shape_and_builder_contract() -> None:
+    model = MidFusionDeltaDecoder(hidden_dim=64, dropout=0.0)
+    output = model(torch.zeros(2, 3, 224, 224))
+    assert output.shape == (2, 224, 2)
+
+    built = build_delta_decoder("mid_fusion_delta", channels="rgb", dropout=0.0)
+    built_output = built(torch.zeros(2, 3, 224, 224))
+    assert built_output.shape == (2, 224, 2)
+
+    try:
+        build_delta_decoder("mid_fusion_delta", channels="r")
+    except ValueError as error:
+        assert "only supports channels='rgb'" in str(error)
+    else:
+        raise AssertionError("mid_fusion_delta should reject non-rgb channel modes")

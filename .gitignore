@@ -79,3 +79,13 @@ data_latent_delta_224_latent28/
 # Week 03 generated artifacts
 week03/logs/
 week03/results/
+
+# Week 05 generated artifacts
+week05/data/*
+!week05/data/.gitkeep
+week05/logs/
+week05/results/
+week05/results_npy_samples/
+week05/fid_results/
+week05/guidance_consistency_results/
+week05/guidance_consistency_results_gradclip010/

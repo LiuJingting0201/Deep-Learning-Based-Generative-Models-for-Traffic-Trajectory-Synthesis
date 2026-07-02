@@ -2,6 +2,7 @@
 
 from cnr_trajectory.reconstruction.delta_displacement import (
     DeltaDisplacementPairedDataset,
+    MidFusionDeltaDecoder,
     MultiBranchDeltaDecoder,
     SingleChannelEncoder,
     SimpleCNNDeltaDecoder,
@@ -11,6 +12,7 @@ from cnr_trajectory.reconstruction.delta_displacement import (
 
 __all__ = [
     "DeltaDisplacementPairedDataset",
+    "MidFusionDeltaDecoder",
     "MultiBranchDeltaDecoder",
     "SingleChannelEncoder",
     "SimpleCNNDeltaDecoder",
