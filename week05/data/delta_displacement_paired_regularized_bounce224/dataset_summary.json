@@ -1,0 +1,39 @@
+{
+  "input_root": "/home/jliu/Thesis/week05/data/delta_displacement_paired",
+  "output_root": "/home/jliu/Thesis/week05/data/delta_displacement_paired_regularized_bounce224",
+  "num_source_samples": 12061,
+  "num_output_samples": 12061,
+  "num_skipped_samples": 0,
+  "target_length": 224,
+  "min_length": 2,
+  "long_mode": "truncate",
+  "stride": 112,
+  "include_tail": false,
+  "source_length": {
+    "min": 13,
+    "max": 657,
+    "mean": 181.54307271370533,
+    "median": 173.0
+  },
+  "regularization_method_counts": {
+    "bounce_reflect_padding": 8738,
+    "truncate_first_224": 3283,
+    "unchanged": 40
+  },
+  "split_counts": {
+    "train": 9648,
+    "val": 1206,
+    "test": 1207
+  },
+  "max_reconstruction_error": 3.410605131648481e-12,
+  "outputs": {
+    "metadata": "metadata.csv",
+    "skipped_samples": "skipped_samples.csv",
+    "splits": "splits/{train,val,test}_ids.csv",
+    "normalization_diagnostics": "normalization_diagnostics.json",
+    "normalization_plots": "normalization_plots/{dx_distribution,dy_distribution}.png",
+    "absolute_labels": "labels_absolute/*.npy",
+    "delta_displacement_labels": "labels_delta_displacement/*.npy",
+    "starts": "starts/*.npy"
+  }
+}
