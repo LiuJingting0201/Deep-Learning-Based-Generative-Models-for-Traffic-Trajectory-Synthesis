@@ -89,3 +89,8 @@ week05/results_npy_samples/
 week05/fid_results/
 week05/guidance_consistency_results/
 week05/guidance_consistency_results_gradclip010/
+
+# Week 06 generated artifacts
+week06/data/maps_week05/
+week06/decoded/
+week06/results/
