@@ -1,11 +1,18 @@
-"""Train Week 5 DDPM ablations on regularized delta-displacement float arrays.
+"""Train Week 5 DDPM ablations on regularized trajectory GASF float arrays.
 
 The dataset root contains 224-step delta trajectories, absolute labels, starts,
 splits, and normalization diagnostics. This script builds DDPM training inputs
-as float array tensors on the fly:
+as float array tensors on the fly. The default representation is the original
+delta-displacement GASF:
 
 R = GASF(sigmoid-normalized dx)
 G = GASF(sigmoid-normalized dy)
+B = start-position heatmap
+
+For the absolute-position ablation, use ``--representation-mode absolute``:
+
+R = GASF(sigmoid-normalized x)
+G = GASF(sigmoid-normalized y)
 B = start-position heatmap
 
 No PNG inputs are used for training.
@@ -52,6 +59,7 @@ class Week05DeltaGASFDataset(torch.utils.data.Dataset):
         image_size: int,
         normalization_file: Path,
         sigmoid_k: float,
+        representation_mode: str = "delta",
         split: str = "train",
         heatmap_sigma: float = 2.5,
     ):
@@ -59,6 +67,7 @@ class Week05DeltaGASFDataset(torch.utils.data.Dataset):
         self.image_size = int(image_size)
         self.normalization_file = Path(normalization_file)
         self.sigmoid_k = float(sigmoid_k)
+        self.representation_mode = representation_mode
         self.split = split
         self.heatmap_sigma = float(heatmap_sigma)
         self.delta_dir = self.data_root / "labels_delta_displacement"
@@ -75,11 +84,12 @@ class Week05DeltaGASFDataset(torch.utils.data.Dataset):
 
     def _validate_first_sample(self) -> None:
         sample_id = self.sample_ids[0]
-        delta_xy = np.load(self.delta_dir / f"{sample_id}.npy")
-        if delta_xy.shape != (self.image_size, 2):
+        label_dir = self.delta_dir if self.representation_mode == "delta" else self.absolute_dir
+        label_xy = np.load(label_dir / f"{sample_id}.npy")
+        if label_xy.shape != (self.image_size, 2):
             raise ValueError(
-                f"Expected delta shape ({self.image_size}, 2), got {delta_xy.shape} "
-                f"in {self.delta_dir / f'{sample_id}.npy'}"
+                f"Expected label shape ({self.image_size}, 2), got {label_xy.shape} "
+                f"in {label_dir / f'{sample_id}.npy'}"
             )
 
     def __len__(self) -> int:
@@ -87,22 +97,36 @@ class Week05DeltaGASFDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> torch.Tensor:
         sample_id = self.sample_ids[index]
-        delta_xy = np.load(self.delta_dir / f"{sample_id}.npy").astype(np.float32)
-        if delta_xy.shape != (self.image_size, 2):
+        label_dir = self.delta_dir if self.representation_mode == "delta" else self.absolute_dir
+        label_xy = np.load(label_dir / f"{sample_id}.npy").astype(np.float32)
+        if label_xy.shape != (self.image_size, 2):
             raise ValueError(
-                f"Expected delta shape ({self.image_size}, 2), got {delta_xy.shape} "
-                f"in {self.delta_dir / f'{sample_id}.npy'}"
+                f"Expected label shape ({self.image_size}, 2), got {label_xy.shape} "
+                f"in {label_dir / f'{sample_id}.npy'}"
             )
         start_xy = self._load_start(sample_id)
-        array = encode_delta_as_float_array(
-            delta_xy=delta_xy,
-            start_xy=start_xy,
-            normalization=self.normalization,
-            position_stats=self.position_stats,
-            sigmoid_k=self.sigmoid_k,
-            image_size=self.image_size,
-            heatmap_sigma=self.heatmap_sigma,
-        )
+        if self.representation_mode == "delta":
+            array = encode_delta_as_float_array(
+                delta_xy=label_xy,
+                start_xy=start_xy,
+                normalization=self.normalization,
+                position_stats=self.position_stats,
+                sigmoid_k=self.sigmoid_k,
+                image_size=self.image_size,
+                heatmap_sigma=self.heatmap_sigma,
+            )
+        elif self.representation_mode == "absolute":
+            array = encode_absolute_as_float_array(
+                absolute_xy=label_xy,
+                start_xy=start_xy,
+                normalization=self.normalization,
+                position_stats=self.position_stats,
+                sigmoid_k=self.sigmoid_k,
+                image_size=self.image_size,
+                heatmap_sigma=self.heatmap_sigma,
+            )
+        else:
+            raise ValueError(f"Unsupported representation_mode: {self.representation_mode}")
         tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
         return tensor * 2.0 - 1.0
 
@@ -138,6 +162,7 @@ def main() -> None:
         image_size=args.image_size,
         normalization_file=args.normalization_file,
         sigmoid_k=args.sigmoid_k,
+        representation_mode=args.representation_mode,
         split=args.split,
         heatmap_sigma=args.heatmap_sigma,
     )
@@ -343,6 +368,24 @@ def encode_delta_as_float_array(
     return np.clip(image_float, 0.0, 1.0).astype(np.float32)
 
 
+def encode_absolute_as_float_array(
+    absolute_xy: np.ndarray,
+    start_xy: np.ndarray,
+    normalization: dict[str, float],
+    position_stats: dict[str, float],
+    sigmoid_k: float,
+    image_size: int,
+    heatmap_sigma: float,
+) -> np.ndarray:
+    x_norm = sigmoid_normalize(absolute_xy[:, 0], normalization["x_mean"], normalization["x_std"], sigmoid_k)
+    y_norm = sigmoid_normalize(absolute_xy[:, 1], normalization["y_mean"], normalization["y_std"], sigmoid_k)
+    gasf_x = gasf_encode(x_norm)
+    gasf_y = gasf_encode(y_norm)
+    heatmap = make_start_heatmap(start_xy, position_stats, image_size, heatmap_sigma)
+    image_float = np.stack([(gasf_x + 1.0) / 2.0, (gasf_y + 1.0) / 2.0, heatmap], axis=-1)
+    return np.clip(image_float, 0.0, 1.0).astype(np.float32)
+
+
 def sigmoid_normalize(values: np.ndarray, mean: float, std: float, k_value: float) -> np.ndarray:
     if std == 0.0:
         raise ValueError("Cannot apply sigmoid normalization with zero std.")
@@ -395,6 +438,8 @@ def resolve_sample_ids(data_root: Path, split: str) -> list[str]:
 def load_normalization(path: Path) -> dict[str, float]:
     payload = json.loads(path.read_text())
     required = ("dx_mean", "dx_std", "dy_mean", "dy_std")
+    if "x_mean" in payload or "y_mean" in payload:
+        required = ("x_mean", "x_std", "y_mean", "y_std")
     missing = [key for key in required if key not in payload]
     if missing:
         raise ValueError(f"{path} is missing normalization keys: {missing}")
@@ -447,6 +492,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--normalization-file", type=Path, default=None)
+    parser.add_argument("--representation-mode", choices=("delta", "absolute"), default="delta")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="train")
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--sigmoid-k", type=float, required=True)
@@ -483,7 +529,7 @@ def resolve_normalization_file(args: argparse.Namespace) -> Path:
 def fail_early(args: argparse.Namespace) -> None:
     if not args.data_root.exists():
         raise FileNotFoundError(args.data_root)
-    if not (args.data_root / "labels_delta_displacement").is_dir():
+    if args.representation_mode == "delta" and not (args.data_root / "labels_delta_displacement").is_dir():
         raise FileNotFoundError(args.data_root / "labels_delta_displacement")
     if not (args.data_root / "labels_absolute").is_dir():
         raise FileNotFoundError(args.data_root / "labels_absolute")
@@ -505,7 +551,8 @@ def print_startup_diagnostics(args: argparse.Namespace, dataset: Week05DeltaGASF
         "normalization_file": str(args.normalization_file),
         "normalization_mode": "sigmoid",
         "sigmoid_k": args.sigmoid_k,
-        "data_format": "float_gasf_generated_on_the_fly_from_delta_npy",
+        "representation_mode": args.representation_mode,
+        "data_format": f"float_gasf_generated_on_the_fly_from_{args.representation_mode}_npy",
         "png_inputs_used": False,
         "image_size": args.image_size,
         "channels": 3,
@@ -548,6 +595,7 @@ def write_startup_config(
                 "normalization_file": str(args.normalization_file),
                 "normalization_stats": dataset.normalization,
                 "position_stats": dataset.position_stats,
+                "representation_mode": args.representation_mode,
                 "num_inputs": len(dataset),
                 "sigmoid_k": args.sigmoid_k,
                 "aux_loss_mode": args.aux_loss_mode,
@@ -557,7 +605,7 @@ def write_startup_config(
                 "batch_size": args.batch_size,
                 "max_train_steps": args.max_train_steps,
                 "seed": args.seed,
-                "data_format": "float_gasf_generated_on_the_fly_from_delta_npy",
+                "data_format": f"float_gasf_generated_on_the_fly_from_{args.representation_mode}_npy",
                 "png_inputs_used": False,
             },
             indent=2,
@@ -576,7 +624,8 @@ def write_summary(
         "global_step": global_step,
         "num_inputs": len(dataset),
         "data_root": str(args.data_root),
-        "data_format": "float_gasf_generated_on_the_fly_from_delta_npy",
+        "representation_mode": args.representation_mode,
+        "data_format": f"float_gasf_generated_on_the_fly_from_{args.representation_mode}_npy",
         "png_inputs_used": False,
         "image_size": args.image_size,
         "channels": 3,
