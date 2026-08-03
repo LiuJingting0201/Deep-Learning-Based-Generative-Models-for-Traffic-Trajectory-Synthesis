@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=week04_B_gasf_struct
+#SBATCH --partition=gpu_a40
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=1-00:00:00
+#SBATCH --output=/home/jliu/Thesis/week04/logs/%x_%j.out
+#SBATCH --error=/home/jliu/Thesis/week04/logs/%x_%j.err
+
+set -euo pipefail
+cd /home/jliu/Thesis
+mkdir -p /home/jliu/Thesis/week04/logs /home/jliu/Thesis/week04/configs
+module purge
+module load miniconda3/3.13.25
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate thesis-diffusion
+PYTHON="/home/jliu/.conda/envs/thesis-diffusion/bin/python"
+DIAG_TARGET="/home/jliu/Thesis/week04/configs/diag_targets_constrained.json"
+if [[ ! -f "$DIAG_TARGET" ]]; then
+  "$PYTHON" /home/jliu/Thesis/week04/compute_gasf_diag_targets.py \
+    --data-dir /home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start/images \
+    --output-file "$DIAG_TARGET"
+fi
+"$PYTHON" /home/jliu/Thesis/week04/scripts/train_week04_ddpm.py \
+  --data-dir /home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start/images \
+  --run-name week04_B_constrained_gasf_structure_50k \
+  --batch-size 8 \
+  --gradient-accumulation-steps 2 \
+  --max-train-steps 50000 \
+  --aux-loss-mode gasf_structure \
+  --diag-target-file "$DIAG_TARGET" \
+  --symmetry-weight 0.01 \
+  --diag-weight 0.01 \
+  --sample-every 2500 \
+  --save-every 2500 \
+  --num-sample-images 16 \
+  --sample-inference-steps 100 \
+  --seed 42 \
+  --copy-results-to-home

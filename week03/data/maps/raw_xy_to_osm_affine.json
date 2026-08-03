@@ -1,0 +1,52 @@
+{
+  "description": "[x_raw, y_raw, 1] @ affine_matrix = [x_osm, y_osm]",
+  "created_by": "fit_raw_xy_to_osm_affine.py",
+  "input_trajectory_path": "/home/jliu/gps_with_speed_224_UPDATED.xls",
+  "osm_edges_path": "/home/jliu/Thesis/week03/data/maps/osm_drive_edges.gpkg",
+  "osm_crs": "EPSG:32633",
+  "raw_columns": [
+    "x",
+    "y"
+  ],
+  "target_columns": [
+    "lon",
+    "lat projected to OSM CRS"
+  ],
+  "affine_matrix": [
+    [
+      1.0000000000599885,
+      4.941468195677034e-10
+    ],
+    [
+      -6.87805368215777e-11,
+      0.9999999994370228
+    ],
+    [
+      506599.99999999977,
+      4150650.0
+    ]
+  ],
+  "num_points": 707616,
+  "num_vehicles": 3159,
+  "least_squares_rank": 3,
+  "least_squares_residuals": [
+    3.95248130677278e-14,
+    1.1870048940248553e-11
+  ],
+  "least_squares_singular_values": [
+    1238174.0398800871,
+    385650.02845049085,
+    289.7962577041178
+  ],
+  "residual_error_m": {
+    "mean": 2.739750647576484e-07,
+    "median": 2.27617773982723e-07,
+    "p90": 5.783549231082162e-07,
+    "p95": 6.688406657953537e-07,
+    "p99": 7.889190412250475e-07,
+    "max": 9.19407324383323e-07
+  },
+  "warning_mean_threshold_m": 10.0,
+  "warning_p95_threshold_m": 25.0,
+  "warnings": []
+}

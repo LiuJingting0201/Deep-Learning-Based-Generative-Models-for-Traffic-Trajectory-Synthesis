@@ -1,0 +1,11 @@
+{
+  "data_root": "/home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start",
+  "num_rows": 3159,
+  "num_numeric_rows": 3159,
+  "num_status_ok_at_1e-6": 3159,
+  "num_status_mismatch_at_1e-6": 0,
+  "mean_mse": 0.0,
+  "max_mse": 0.0,
+  "mean_max_error": 0.0,
+  "global_max_error": 0.0
+}

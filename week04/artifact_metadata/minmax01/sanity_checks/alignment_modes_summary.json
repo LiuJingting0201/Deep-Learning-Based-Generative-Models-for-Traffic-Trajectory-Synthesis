@@ -1,0 +1,51 @@
+{
+  "data_root": "/home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start",
+  "num_rows": 3159,
+  "num_valid_rows": 3159,
+  "num_error_rows": 0,
+  "mode_definitions": {
+    "mode_a": "xy[0]=start; xy[t]=xy[t-1]+delta[t]",
+    "mode_b": "xy[0]=start; xy[t]=xy[t-1]+delta[t-1]",
+    "mode_c": "xy=start+cumsum(delta)"
+  },
+  "mode_a": {
+    "mean_ade": 3.365864042457852e-17,
+    "median_ade": 0.0,
+    "max_ade": 1.0610560049631853e-13,
+    "mean_fde": 3.5988236062556514e-17,
+    "median_fde": 0.0,
+    "max_fde": 1.1368683772161603e-13,
+    "mean_max_error": 4.048676557037608e-17,
+    "global_max_error": 1.1368683772161603e-13
+  },
+  "mode_b": {
+    "mean_ade": 9.171823717097455,
+    "median_ade": 9.245033964480209,
+    "max_ade": 17.16687388862892,
+    "mean_fde": 9.413626362293835,
+    "median_fde": 8.838218146210277,
+    "max_fde": 33.56248649906619,
+    "mean_max_error": 26.646645496672413,
+    "global_max_error": 36.02419742339873
+  },
+  "mode_c": {
+    "mean_ade": 5.159394446648071e-14,
+    "median_ade": 1.349713991365726e-14,
+    "max_ade": 9.15538776678702e-13,
+    "mean_fde": 1.855061988677628e-13,
+    "median_fde": 0.0,
+    "max_fde": 2.341343437791525e-12,
+    "mean_max_error": 2.847099367925916e-13,
+    "global_max_error": 2.4442670110147446e-12
+  },
+  "mode_a_minus_c": {
+    "mean_abs_error_mean": 2.667904449343502e-14,
+    "max_abs_error_global": 2.4442670110147446e-12
+  },
+  "delta0": {
+    "max_abs_x": 0.0,
+    "max_abs_y": 0.0,
+    "nonzero_count_at_1e-12": 0
+  },
+  "conclusion": "Mode A and Mode C match the stored delta convention; Mode B is the off-by-one alternative and produces much larger ADE/FDE."
+}

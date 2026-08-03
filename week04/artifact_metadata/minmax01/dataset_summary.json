@@ -1,0 +1,15 @@
+{
+  "representation": "GASF_dx_GASF_dy_start_heatmap",
+  "input_root": "/home/jliu/data_no_speed_delta_displacement_paired",
+  "output_root": "/home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start",
+  "image_size": 224,
+  "heatmap_sigma": 3.0,
+  "split": "all",
+  "max_samples": null,
+  "normalization_source": "train_split",
+  "requested_samples": 3159,
+  "processed_samples": 3159,
+  "skipped_samples": 0,
+  "sanity_checked_samples": 20,
+  "sanity_warnings": 19
+}

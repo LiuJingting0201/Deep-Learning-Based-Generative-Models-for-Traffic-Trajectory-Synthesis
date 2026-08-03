@@ -1,0 +1,20 @@
+{
+  "representation": "GASF_dx_GASF_dy_start_heatmap_neg11",
+  "image_size": 224,
+  "dx_min": -34.42000000000007,
+  "dx_max": 34.38999999999987,
+  "dy_min": -34.8599999999999,
+  "dy_max": 33.629999999999995,
+  "x_min": 2.32,
+  "x_max": 2953.0,
+  "y_min": 7.41,
+  "y_max": 1783.03,
+  "normalization_range": "[-1,1]",
+  "normalization_formula": "2 * (value - min) / (max - min) - 1",
+  "gasf_input_range": "[-1,1]",
+  "sign_lost_from_gasf_diagonal": true,
+  "analytical_inverse_note": "GASF diagonal gives abs(x)=sqrt((diag+1)/2), not signed x. This dataset is not exactly invertible from the diagonal alone.",
+  "normalization_source": "train_split",
+  "input_root": "/home/jliu/data_no_speed_delta_displacement_paired",
+  "output_root": "/home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start_neg11"
+}

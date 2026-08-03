@@ -60,6 +60,21 @@ experiments/
 Thumbs.db
 *:Zone.Identifier
 
+# Workspace-local tooling and delivery bundles
+.vscode/
+cache/
+thesis_documentation_package_*/
+*.sha256
+
+# LaTeX build intermediates
+*.aux
+*.fls
+*.fdb_latexmk
+*.lof
+*.lot
+*.toc
+*.synctex.gz
+
 # Model artifacts
 checkpoints/
 **/checkpoints/
@@ -79,6 +94,15 @@ data_latent_delta_224_latent28/
 # Week 03 generated artifacts
 week03/logs/
 week03/results/
+
+# Week 04 generated datasets, samples, logs, and model states
+week04/data_constrained_gasf_dxdy_start/
+week04/data_constrained_gasf_dxdy_start_neg11/
+week04/debug_runs/
+week04/resampled_samples/
+week04/results_smoke/
+week04/runs_light/
+week04/smoke_gasf_structure/
 
 # Week 05 generated artifacts
 week05/data/*

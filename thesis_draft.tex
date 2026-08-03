@@ -1,0 +1,1210 @@
+\documentclass[12pt,a4paper,oneside]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[a4paper,margin=30mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{2}
+\renewcommand{\arraystretch}{1.15}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\placeholder}[1]{\textit{[#1]}}
+\newcommand{\NA}{\textemdash}
+\newcommand{\repofigure}[4][0.92]{%
+  \begin{figure}[p]
+    \centering
+    \includegraphics[width=#1\textwidth]{\detokenize{#2}}
+    \caption{#3}
+    \label{#4}
+  \end{figure}}
+
+\title{Generative Models for Traffic Trajectory Synthesis:\\A Comparative Study}
+\author{\placeholder{Author name}}
+\date{\placeholder{Submission date}}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{22mm}
+{\Large \placeholder{Institution}\par}
+\vspace{18mm}
+{\Huge\bfseries Generative Models for Traffic Trajectory Synthesis\par}
+\vspace{4mm}
+{\LARGE A Comparative Study\par}
+\vspace{22mm}
+{\Large \placeholder{Author name}\par}
+\vfill
+{\large A thesis submitted for the degree of\par}
+\vspace{3mm}
+{\large \placeholder{Degree programme}\par}
+\vspace{12mm}
+{\large Supervisor: \placeholder{Supervisor name}\par}
+\vspace{18mm}
+{\large \placeholder{Submission date}\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+
+\chapter*{Declaration}
+\addcontentsline{toc}{chapter}{Declaration}
+\placeholder{Insert the institutionally required authorship and originality declaration before submission.}
+
+\chapter*{Acknowledgements}
+\addcontentsline{toc}{chapter}{Acknowledgements}
+\placeholder{To be completed by the author.}
+
+\begin{abstract}
+This thesis studies how traffic trajectories should be represented for generative modelling. Two principal pipelines are compared. The first applies denoising diffusion directly to fixed-length absolute-coordinate or displacement sequences. The second converts trajectories into Gramian Angular Summation Field (GASF) images, applies a two-dimensional image diffusion model, and decodes the generated images back into trajectories. The study reconstructs the full experimental history retained in the repository, including unsuccessful, incomplete, and report-only experiments.
+
+The representation analysis distinguishes three effects that are often conflated: information changed by preprocessing, ambiguity in an inverse transformation, and invalidity introduced by a generator that leaves the mathematical manifold of valid encodings. Float-valued, separate-axis GASF with $[0,1]$ normalization reconstructs retained real encodings almost exactly. Nevertheless, the best retained image-space model, a sigmoid-scale 1.5 diagonal-loss GASF model at 40,000 steps, achieved FID 44.5496 while its decoded trajectories had empirical-support mean and 95th-percentile distances of 417.55 and 1059.47. A strict empirical filter accepted only 92 of 1,000 samples (9.2\%).
+
+Direct absolute-coordinate diffusion performed substantially better on physical support. The one-dimensional U-Net achieved 98.5\% empirical acceptance and support mean/95th-percentile distances of 8.4/25.6. This result does not demonstrate full distributional fidelity: its mean displacement was 549.7 compared with 876.9 for the real reference, and its bounding-box extent was also smaller. The retained evidence therefore favours direct absolute-coordinate modelling for unconditional trajectory synthesis, while showing that coverage, diversity, multi-seed uncertainty, and quantitative map matching remain unresolved.
+\end{abstract}
+
+\chapter*{Evidence and Reproducibility Statement}
+\addcontentsline{toc}{chapter}{Evidence and Reproducibility Statement}
+This first draft is restricted to evidence recovered from the thesis workspace. Numerical values are taken from retained logs, JSON and CSV summaries, arrays, figures, checkpoints, and the repository archaeology documents \texttt{experiment\_inventory.md} and \texttt{results\_summary.md}. No external experimental result has been added. Early results whose named output directories are no longer present are explicitly identified as \emph{report-only}. Distances are reported in the planar coordinate units used by the workspace and treated as metres in the OSM experiments; cross-phase comparisons are made only where data, coordinate transforms, populations, and metrics permit them.
+
+No Jupyter notebook was present at the archaeology date. Some historical notebooks and an \texttt{experiments/} tree are referenced by \texttt{docs/weekly\_report\_refactoring\_validation.md} but are absent from the current workspace. Nearest-road and empirical-support distances are not called map-matching errors, because no retained quantitative LCSS map-matching result was found. The full failure ledger is preserved in Appendix~\ref{app:ledger}.
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\chapter*{Notation and Acronyms}
+\addcontentsline{toc}{chapter}{Notation and Acronyms}
+\begin{longtable}{L{0.20\textwidth}L{0.70\textwidth}}
+\toprule
+Symbol or acronym & Meaning \\
+\midrule
+$P=(p_1,\ldots,p_T)$ & Two-dimensional trajectory of length $T$ \\
+$d_t$ & Displacement between adjacent trajectory positions \\
+ADE / FDE & Average / final displacement error \\
+DDPM / DDIM & Denoising diffusion probabilistic model / denoising diffusion implicit model \\
+EMA & Exponential moving average \\
+GAF & Gramian Angular Field \\
+GASF / GADF & Gramian Angular Summation / Difference Field \\
+MTF & Markov Transition Field \\
+FID / KID & Fr\'echet Inception Distance / Kernel Inception Distance \\
+OSM & OpenStreetMap \\
+CRS / UTM & Coordinate reference system / Universal Transverse Mercator \\
+\bottomrule
+\end{longtable}
+
+\clearpage
+\pagenumbering{arabic}
+
+\chapter{Introduction}
+\label{chap:introduction}
+
+\section{Problem Context}
+
+A traffic trajectory is an ordered sequence of spatial positions whose interpretation depends not only on individual coordinates but also on temporal continuity, displacement, spatial extent, and compatibility with the surrounding transport network. Generating such trajectories therefore requires more than reproducing plausible marginal coordinate values. A successful model must generate coherent paths, preserve realistic motion statistics, and remain within the spatial support represented by the data.
+
+This thesis investigates traffic trajectory synthesis using denoising diffusion probabilistic models. Its central methodological question is:
+
+\begin{quote}
+How should traffic trajectories be represented for generative modelling?
+\end{quote}
+
+Two approaches form the main comparison. The first applies diffusion directly to fixed-length coordinate or displacement sequences of shape $2\times T$. The second transforms trajectories into three-channel GASF images and applies a two-dimensional image diffusion model before decoding generated images back into trajectories. In the retained experiments, $T=224$.
+
+The image representation is attractive because it exposes global pairwise temporal relationships as spatial texture and permits the use of two-dimensional U-Net architectures. Trajectory generation, however, places stricter requirements on the representation than discriminative use. Every generated image must lie sufficiently close to the constrained set of valid Gramian matrices, admit a stable inverse transformation, recover its starting location, and yield a plausible path after cumulative integration.
+
+\section{Research Motivation}
+
+The repository records a progression from legacy Hilbert--GAF image experiments to an analytically decodable separate-axis GASF representation and, finally, to direct raw-trajectory diffusion. This progression was motivated by a recurring mismatch between image-space quality and trajectory-space validity.
+
+The strongest retained image-space result was obtained by a sigmoid-scale 1.5, diagonal-loss GASF model at 40,000 training steps. Evaluated using 1,000 generated images and 50 reverse diffusion steps, it obtained an FID of 44.5496. Nevertheless, decoding the selected model produced trajectories with empirical-support mean and 95th-percentile distances of 417.55 and 1059.47. The strict empirical-support filter accepted only 92 of 1,000 samples, or 9.2\%.
+
+By contrast, direct diffusion of absolute coordinates with a one-dimensional U-Net obtained an empirical acceptance rate of 98.5\%, with support mean and 95th-percentile distances of 8.4 and 25.6. This model was not fully distributionally faithful: generated mean displacement was 549.7, compared with 876.9 for the real reference, and its mean bounding box was $613.5\times448.5$, compared with $972.6\times681.2$. The evidence therefore favours direct absolute-coordinate diffusion for validity while indicating that its distributional coverage remains incomplete.
+
+\section{Research Questions}
+
+\begin{enumerate}
+  \item How much trajectory information is preserved by raw coordinates, raw displacements, legacy Hilbert--GAF images, and separate-axis constrained GASF images?
+  \item Does image-space quality, measured using FID, predict trajectory-space validity after inversion?
+  \item How do absolute-coordinate and displacement diffusion compare with respect to spatial support, displacement, extent, and local step statistics?
+  \item Can structural losses, learned inverse models, rejection filters, or map-based sampling guidance close the validity gap of GASF generation?
+\end{enumerate}
+
+\section{Contributions}
+
+The contributions supported by the retained evidence are:
+
+\begin{enumerate}
+  \item A repository-scale comparison of direct trajectory diffusion and multiple GAF/GASF image formulations on two retained trajectory datasets.
+  \item An invertibility analysis that distinguishes transformation loss from generated-manifold violation. Real float-valued $[0,1]$ GASF encodings reconstructed with approximately $10^{-5}$ to $10^{-4}$ maximum error, whereas generated GASF images frequently decoded to invalid paths.
+  \item A trajectory-space evaluation framework incorporating displacement, path extent, maximum step, empirical-support distance, OSM road distance, rejection rate, and decoded-range violations.
+  \item Evidence that low image FID is insufficient to establish trajectory validity: the best retained GASF FID was 44.5496, while strict empirical acceptance after decoding was 9.2\%.
+  \item Evidence that direct absolute-coordinate diffusion currently provides substantially higher empirical validity. The absolute one-dimensional U-Net achieved 98.5\% acceptance, although its reduced displacement and bounding-box extent indicate conservative generation.
+  \item A systematic record of negative and incomplete experiments, including sign ambiguity under $[-1,1]$ GASF normalization, cumulative integration drift, NaN-producing structure losses, map-coordinate misalignment, ineffective consistency guidance, and unstable map guidance through the GASF inverse.
+\end{enumerate}
+
+\section{Thesis Organisation}
+
+Chapter~\ref{chap:background} introduces trajectory representations, diffusion models, GAF transformations, evaluation metrics, and map constraints. Chapter~\ref{chap:data} documents the two datasets, preprocessing pipelines, fixed-length policies, normalization, and validation. Chapter~\ref{chap:representations} analyses raw and image-based representations. Chapter~\ref{chap:models} describes the generative and inverse models. Chapter~\ref{chap:evaluation} presents the experimental results. Chapter~\ref{chap:failures} records failure modes and negative experiments, Chapter~\ref{chap:discussion} discusses their implications, and Chapters~\ref{chap:future} and~\ref{chap:conclusion} state the remaining work and conclusions.
+
+\chapter{Background}
+\label{chap:background}
+
+\section{Traffic Trajectories}
+
+A trajectory of length $T$ is represented as
+\[
+P=(p_1,\ldots,p_T), \qquad p_t\in\mathbb{R}^2.
+\]
+The corresponding displacement sequence is
+\[
+d_t=p_t-p_{t-1}.
+\]
+Given a starting point $p_0$, a displacement prediction is converted back to positions by
+\[
+\hat p_t=p_0+\sum_{k=1}^{t}\hat d_k.
+\]
+
+Absolute coordinates preserve global location directly, whereas displacements express local movement. Displacement modelling can reduce the scale associated with absolute position, but integration causes local errors to accumulate. If $\delta d_k=\hat d_k-d_k$, the position error at time $t$ is $\sum_{k=1}^{t}\delta d_k$. This mechanism is consistent with retained decoder experiments in which modest displacement errors produced much larger integrated errors.
+
+Trajectory quality is multi-dimensional. The workspace measures local step length, total path length, net displacement, bounding-box width and height, maximum step, empirical-support distance, and nearest-road distance. A representation suitable for synthesis must permit these quantities to be evaluated after generation without an unreliable intermediate inverse.
+
+\section{Denoising Diffusion}
+
+The diffusion models use the forward process
+\[
+q(x_t\mid x_0)=\mathcal{N}\!\left(\sqrt{\bar\alpha_t}x_0,(1-\bar\alpha_t)I\right),
+\]
+where $x_0$ is either an image or a trajectory tensor. The noise predictor is trained with
+\[
+\mathcal{L}_{\mathrm{simple}}=
+\mathbb{E}_{x_0,\epsilon,t}
+\left[\left\|\epsilon-\epsilon_\theta(x_t,t)\right\|_2^2\right].
+\]
+
+The same formulation is applied in two spaces. The GAF/GASF experiments use three-channel $224\times224$ images and two-dimensional U-Nets. The direct experiments use tensors of shape $2\times224$ and temporal residual, dilated residual, or one-dimensional U-Net architectures. Principal full runs use 1,000 forward diffusion timesteps and EMA model parameters.
+
+The legacy sampler audit compared ancestral DDPM and DDIM sampling. On a matched 80-image aggregate, increasing ancestral sampling from 50 to 150 steps improved PureMSE FID from 78.03 to 74.62 and diagonal-loss FID from 93.93 to 81.03. At 150 steps, DDIM obtained 93.41 and 98.71. These results concern sampler behaviour in image space and do not establish trajectory validity.
+
+\section{Convolutional Model Families}
+
+The principal image model is a two-dimensional U-Net with three input and output channels. In the retained legacy configuration it uses two layers per block, widths $(128,128,256,256,512,512)$, and an attention stage in the downsampling and upsampling paths.
+
+The raw comparison evaluates a temporal residual network, a dilated temporal residual network, and a one-dimensional U-Net. The retained configurations use hidden width 128, eight residual blocks where applicable, and a time embedding of dimension 256. These models operate directly on the temporal axis instead of treating pairwise relationships as pixels.
+
+\section{Gramian Angular Fields}
+
+For a normalized scalar sequence $x_t\in[-1,1]$, define $\phi_t=\arccos(x_t)$. The Gramian Angular Summation Field and Difference Field are
+\[
+G^{\mathrm{S}}_{ij}=\cos(\phi_i+\phi_j),
+\qquad
+G^{\mathrm{D}}_{ij}=\sin(\phi_i-\phi_j).
+\]
+The summation field is symmetric and the difference field is antisymmetric. The legacy image pipeline also uses an eight-bin MTF that distributes scalar transition probabilities across pairs of time indices.
+
+The GASF diagonal satisfies
+\[
+G^{\mathrm{S}}_{tt}=\cos(2\phi_t)=2x_t^2-1.
+\]
+When $x_t\in[0,1]$,
+\[
+x_t=\sqrt{\frac{G^{\mathrm{S}}_{tt}+1}{2}}.
+\]
+If the stored channel is $C=(G^{\mathrm{S}}+1)/2$, this becomes $x_t=\sqrt{C_{tt}}$. The diagonal does not preserve sign for $x_t\in[-1,1]$, because it identifies $x_t^2$ rather than $x_t$.
+
+\section{Evaluation Metrics}
+
+For a paired predicted and reference trajectory,
+\[
+\mathrm{ADE}=\frac{1}{T}\sum_{t=1}^{T}\|\hat p_t-p_t\|_2,
+\qquad
+\mathrm{FDE}=\|\hat p_T-p_T\|_2.
+\]
+These metrics apply to reconstruction experiments. They are not directly defined for unconditional generation without a pairing rule.
+
+Image experiments use FID and, in historical runs, KID. These scores measure similarity in an image feature space. Here they are applied to scientific GAF/GASF images rather than natural images and are treated as proxy diagnostics, not trajectory-validity scores.
+
+Unconditional trajectory evaluation instead uses geometric statistics and spatial-support measures. Empirical-support distance measures distance from generated points to retained data support. OSM evaluation measures nearest-road distance after coordinate alignment. Acceptance is obtained by requiring every threshold in a specified rejection policy to pass. Acceptance must be interpreted with displacement, extent, and diversity because a conservative model may attain high validity while covering only a restricted part of the real distribution.
+
+\section{Digital Maps and Spatial Constraints}
+
+The workspace contains OSM graph construction, coordinate alignment, raster distance fields, rejection filters, and differentiable guidance. Week 03 retained an OSM graph with 1,465 nodes and 2,672 edges in EPSG:32633. A later Week 06 graph contained 1,848 nodes and 3,580 edges.
+
+The first Week 06 graph covered only 0.0395\% of the newer data points. Rebuilding the graph and applying the selected planar offset $(+220,-720)$ reduced real-data road-distance mean from 25.51 to 15.49 and the 95th percentile from 70.16 to 41.15. Coordinate-frame validation is therefore necessary before generated trajectories can be judged against a map.
+
+Although the repository contains an LCSS map-matching wrapper, no retained quantitative LCSS result was found. The map results in this thesis are consequently described as road proximity, support distance, alignment, or refinement rather than completed quantitative map matching.
+
+\chapter{Dataset and Preprocessing}
+\label{chap:data}
+
+\section{Data Sources and Provenance}
+
+Two trajectory sources are retained and are reported separately. Their results cannot be pooled without accounting for their different populations and preprocessing histories.
+
+\begin{table}[htbp]
+\centering
+\caption{Retained trajectory datasets.}
+\label{tab:datasets}
+\small
+\begin{tabular}{L{0.25\textwidth}L{0.31\textwidth}L{0.35\textwidth}}
+\toprule
+Property & Legacy dataset & Week 05/06 dataset \\
+\midrule
+Source & \texttt{gps\_with\_speed\_224\_UPDATED.xls} & \texttt{vehicle\_positions\_TS\_New.csv} \\
+Storage note & CSV-formatted text despite suffix & CSV \\
+Rows & Not separately retained & 2,189,591 \\
+Trajectories/vehicle IDs & 3,159 & 12,061 \\
+Original length & Fixed/preprocessed to 224 & 13--657; mean 181.543; median 173 \\
+Train/validation/test & 2,527/315/317 & 9,648/1,206/1,207 \\
+Principal use & Legacy GAF, inverse models, Week 04 & Week 05 GASF and Week 06 raw diffusion \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The legacy pipeline globally normalizes two-dimensional longitude/latitude positions and converts them to a scalar Hilbert representation. The newer pipeline operates on planar positions and derives absolute-coordinate and displacement representations. The map work treats planar coordinate distances as metres, subject to dataset-specific affine and OSM alignment.
+
+Some early experiments survive only in \texttt{docs/weekly\_report\_refactoring\_validation.md}. That report refers to original notebooks and an \texttt{experiments/} result tree that were absent during repository archaeology. Values recovered solely from that report are labelled historical or report-only in Chapter~\ref{chap:evaluation}.
+
+\section{Grouping and Deterministic Preparation}
+
+The repository pipelines group records by vehicle and prepare ordered coordinate sequences. The legacy source is loaded using a CSV reader despite its filename suffix. This draft does not assert missing-value or timestamp-tie behaviour beyond what is documented in the archaeology reports.
+
+For the legacy branch, normalized two-dimensional positions are recursively mapped to a scalar Hilbert index. The scalar sequence is fixed to 224 positions and transformed into GASF, GADF, and eight-bin MTF channels. The original image path stores the result as a quantized PNG.
+
+The constrained-GASF pipeline derives separate $dx$ and $dy$ sequences and stores the starting location independently. The red and green channels are GASF transforms of the normalized displacement axes. The blue channel is a Gaussian start-location heatmap.
+
+\section{Fixed-Length Policies}
+
+Only 40 of the 12,061 newer trajectories naturally contain exactly 224 points. The workspace therefore evaluates multiple length-handling policies.
+
+\begin{table}[htbp]
+\centering
+\caption{Fixed-length preparation policies for the Week 05/06 source.}
+\label{tab:length-policies}
+\small
+\begin{tabular}{L{0.24\textwidth}rL{0.28\textwidth}L{0.28\textwidth}}
+\toprule
+Policy & Retained & Excluded or modified & Main limitation \\
+\midrule
+Variable-length & 12,061 & None & Incompatible with the fixed-$T$ models without masking \\
+Sliding windows, stride 112 & 3,877 & 8,738 short IDs skipped & Excludes 72.45\% of IDs and changes the population \\
+Bounce/truncate & 12,061 & 8,738 bounced; 3,283 truncated & Artificial reversals or lost endpoints \\
+Naturally length 224 & 40 & None & Very small subset \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The bounce procedure repeatedly reflects a short trajectory until it reaches 224 samples. It retains every vehicle ID but introduces reversal motifs that need not have occurred in the original motion. Long trajectories are truncated, discarding later endpoints. Sliding windows avoid bouncing but omit every trajectory shorter than 224 and therefore alter the length and vehicle distribution. The fixed-length rule is part of the experimental representation, not a neutral implementation choice.
+
+The older fixed-length encoder squeezes long sequences and reflect-duplicates short sequences. Its output was used by the legacy image and supervised inverse studies, but transformed sample spacing should not be interpreted as unchanged physical time.
+
+\section{Absolute and Displacement Preparation}
+
+The direct absolute representation z-scores planar coordinates. Retained normalization statistics are
+\[
+\mu_x=1626.710,\quad \sigma_x=641.207,\qquad
+\mu_y=2951.006,\quad \sigma_y=419.397.
+\]
+A generated absolute sequence is decoded by reversing this normalization.
+
+For displacement models, adjacent positions are differenced and later reconstructed from a start. The Week 06 raw delta generator integrates its output from a sampled real starting point. This is an explicit conditioning assumption: the generated path is not independent of the empirical start-location distribution.
+
+The Week 05 constrained GASF uses sigmoid normalization
+\[
+u=\sigma\!\left(k\frac{d-\mu_d}{\sigma_d}\right),
+\]
+with $k\in\{1.0,1.5\}$. Its inverse is
+\[
+d=\mu_d+\frac{\sigma_d}{k}\operatorname{logit}(u).
+\]
+In the earlier Week 04 displacement audit, 566,048 training $dx$ values ranged from $-34.42$ to $34.39$. Their $[0,1]$-normalized mean and standard deviation were 0.5114 and 0.1372, and 53.18\% were within 0.05 of 0.5.
+
+\section{Dataset Splits and Leakage Risks}
+
+The legacy supervised split contains 2,527 training, 315 validation, and 317 test trajectories. The newer split contains 9,648, 1,206, and 1,207 trajectories. Any future windowed experiment should split by vehicle before extracting overlapping windows; otherwise, windows from a single vehicle may cross subsets. The retained summaries do not establish that leakage occurred in the principal completed runs, so this remains a verification requirement rather than a reported failure.
+
+The use of sampled real starts in raw delta generation must also remain visible. Absolute diffusion learns the complete location distribution, whereas delta diffusion combines generated motion with an empirical start.
+
+\section{Preprocessing Validation}
+
+Deterministic round-trip checks separate preprocessing error from model error. Variable-length preparation reconstructed positions with maximum error $3.18\times10^{-12}$. Bounce/truncate preparation reconstructed its retained fixed sequences with maximum error $3.41\times10^{-12}$.
+
+\begin{table}[htbp]
+\centering
+\caption{Constrained $[0,1]$ GASF alignment validation.}
+\label{tab:alignment}
+\begin{tabular}{lrl}
+\toprule
+Alignment & Mean ADE & Interpretation \\
+\midrule
+A & $3.37\times10^{-17}$ & Correct convention; numerical zero \\
+B & 9.1718 & Off-by-one convention \\
+C & $5.16\times10^{-14}$ & Correct equivalent convention \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Float-valued GASF round trips had maximum errors of approximately $10^{-5}$ to $10^{-4}$. Quantized PNG round trips produced ADE from approximately 0.5 to above 10, with maximum errors around 23 in the inspected examples. Float and PNG encodings must therefore not be treated as equivalent.
+
+\chapter{Trajectory Representations}
+\label{chap:representations}
+
+\section{Raw Trajectories}
+
+\subsection{Absolute Coordinates}
+
+The absolute representation stores
+\[
+z_t=\frac{p_t-\mu}{\sigma}
+\]
+for each coordinate axis. Decoding only reverses the z-score transform. This preserves global location, avoids integration drift, and permits spatial constraints to act directly on the generated state.
+
+Its principal difficulty is that the model must learn local motion and the global location distribution jointly. Coordinate-frame errors directly affect interpretation and map evaluation. In the retained comparison, absolute models achieved higher support acceptance than delta models but generated smaller displacement and extent than the real reference.
+
+\subsection{Displacements}
+
+The displacement representation stores $d_t=p_t-p_{t-1}$. It separates local motion from start location and may offer a locally concentrated target, but has cumulative integration error and requires a start mechanism. The retained raw delta models use real sampled starts. Their acceptance rates were 61.0\%, 59.2\%, and 60.5\%, compared with 92.7\%, 95.9\%, and 98.5\% for the matched absolute architectures.
+
+\section{Legacy Hilbert--GAF Representation}
+
+The legacy transformation is
+\[
+\text{two-dimensional path}
+\longrightarrow \text{globally normalized path}
+\longrightarrow \text{Hilbert scalar sequence}
+\longrightarrow \{\mathrm{GASF},\mathrm{GADF},\mathrm{MTF}_8\}.
+\]
+The three fields form the red, green, and blue image channels.
+
+This construction exposes global pairwise patterns to a two-dimensional convolutional model, but it has no analytic inverse from the scalar Hilbert path to the original two-dimensional coordinates. The inverse was approximated with CNN, ResNet, hybrid, structure-aware, and image-to-sequence models. The best retained root-era hybrid obtained integrated ADE/FDE 107.85/147.20, but this required a separately trained supervised inverse. Further modifications arise from length fixing, scalarization, and uint8 quantization.
+
+\repofigure[0.88]{thesis_assets/figures/gaf_structure_components.png}{A retained legacy GAF channel-structure example. The repository analysis measures exact GASF symmetry, near-antisymmetry in GADF, and weaker MTF symmetry.}{fig:gaf-structure}
+
+\section{Separate-Axis Constrained GASF}
+
+The constrained representation eliminates the learned Hilbert inverse. It uses
+\[
+R=\operatorname{GASF}(u^x),\qquad
+G=\operatorname{GASF}(u^y),
+\]
+where $u^x$ and $u^y$ are normalized $dx$ and $dy$ sequences, while the blue channel stores a start heatmap. For $[0,1]$ inputs, the diagonal permits analytic recovery. Under the Week 05 storage convention,
+\[
+u_t=\sqrt{C_{tt}},\qquad
+d_t=\mu_d+\frac{\sigma_d}{k}\operatorname{logit}(u_t),\qquad
+p_t=p_0+\sum_{j=1}^{t}d_j.
+\]
+
+\section{Information Preservation and Inverse Conditioning}
+
+Three sources of error must be separated.
+
+\subsection{Representational Modification}
+
+The legacy pipeline changes sequences through fixed-length regularization, scalarization, and PNG quantization. It therefore has no clean analytic two-dimensional inverse.
+
+\subsection{Mathematical Ambiguity}
+
+The identity $G_{tt}=2x_t^2-1$ identifies only $|x_t|$ when $x_t\in[-1,1]$. The retained audit recovered magnitude nearly exactly but produced positive-sign reconstruction MAE 0.1540 for $dx$ and 0.1326 for $dy$. Negative fractions were 32.10\% and 30.75\%; oracle signs restored exact recovery.
+
+\begin{table}[htbp]
+\centering
+\caption{Diagonal sign-ambiguity audit under $[-1,1]$ normalization.}
+\label{tab:sign-ambiguity}
+\begin{tabular}{lrrr}
+\toprule
+Axis & Magnitude MAE & Positive-branch MAE & Negative fraction \\
+\midrule
+$dx$ & $1.94\times10^{-9}$ & 0.1540 & 32.10\% \\
+$dy$ & $1.55\times10^{-9}$ & 0.1326 & 30.75\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Generated-Manifold Violation}
+
+For real float-valued $[0,1]$ inputs, constrained GASF reconstruction is almost exact. This demonstrates that this encoding is not intrinsically lossy on retained real samples. It does not demonstrate that an unconstrained image generator produces valid GASF matrices.
+
+A valid GASF is determined by a length-$T$ sequence but represented using a $T\times T$ matrix. Its entries must satisfy symmetry, bounds, and global consistency between the diagonal and every off-diagonal element. The generator predicts $O(T^2)$ values for a source with $O(T)$ degrees of freedom; texture-like images may therefore fail the inverse constraints.
+
+The Week 06 decode illustrates this distinction. Generated mean step length, 12.47, was close to the real 11.18, and mean path length was 2,781 compared with 2,492. However, net displacement was 2,350 compared with 876.86, and the generated bounding box was $1665.61\times1413.89$ compared with $972.61\times681.24$. The mean decoded out-of-range fraction was 0.3505. Local pixel or step similarity therefore coexisted with severe global geometric error.
+
+The square-root/logit inverse is also poorly conditioned near its bounds. Full-channel map guidance pushed diagonals toward saturation, produced deltas up to approximately 85, and worsened empirical support. The standalone distance-field primitive did reduce its smoke-test energy from 16 to 11.6476; the failure appeared when its gradients passed through the generated image and inverse.
+
+\section{Why GASF Can Aid Classification Yet Hinder Generation}
+
+No retained classification benchmark establishes a classification gain in this workspace. The classification argument is instead a representation-level explanation. GASF exposes pairwise temporal relations as spatial motifs. Symmetry, repeated structure, and broad correlations can be detected by convolutional filters without exact recovery of each coordinate. Partial inverse ambiguity or quantization need not remove discriminative texture.
+
+Generation is stricter. A generated image must lie near the valid GASF manifold, preserve diagonal/off-diagonal consistency, support stable inverse normalization, retain signs or use a sign-safe normalization, encode a valid start, remain plausible after integration, and meet geometric and map constraints that are non-local in pixel space. FID rewards image-feature similarity, not path geometry. In the retained experiments, the best GASF FID of 44.5496 was followed by only 9.2\% strict empirical acceptance.
+
+The conclusion is not that GASF necessarily destroys all information. It is that GASF transfers the task from modelling a length-$T$ sequence into generating a constrained $T\times T$ object and performing a sensitive inverse.
+
+\section{Representation Comparison}
+
+\begin{table}[htbp]
+\centering
+\caption{Properties of the retained trajectory representations.}
+\label{tab:representation-comparison}
+\small
+\begin{tabular}{L{0.19\textwidth}L{0.16\textwidth}L{0.18\textwidth}L{0.22\textwidth}L{0.22\textwidth}}
+\toprule
+Representation & Model input & Inverse & Main advantage & Main limitation \\
+\midrule
+Raw absolute & $2\times224$ & Direct de-normalization & No integration drift; constraints act in trajectory space & Learns location and motion jointly; retained samples understate extent \\
+Raw delta & $2\times224$ plus start & Cumulative integration & Local motion representation & Drift and empirical-start assumption \\
+Legacy Hilbert GAF & $3\times224\times224$ & Learned decoder & Global pairwise texture & No analytic 2D inverse; quantization and length modification \\
+Constrained GASF & $3\times224\times224$ & Diagonal inverse plus start decode & Near-lossless on real float $[0,1]$ data & Generated matrices leave the valid manifold; bound sensitivity \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The retained evidence supports direct absolute-coordinate diffusion as the strongest current representation for physical validity. It does not establish complete distributional superiority, because the best absolute model generated displacement 549.7 rather than the real 876.9 and bounding-box extent $613.5\times448.5$ rather than $972.6\times681.2$. Coverage and diversity must therefore accompany acceptance in a final benchmark.
+
+\chapter{Generative Models}
+\label{chap:models}
+
+\section{Raw Trajectory DDPM}
+
+\subsection{Common Formulation}
+
+The raw models apply the diffusion objective directly to tensors of shape $[B,2,224]$. Absolute models diffuse z-scored positions and decode them by de-normalization. Delta models diffuse z-scored displacement sequences, sample a start from the empirical start distribution, and integrate the decoded increments. The representation therefore determines whether the reverse process acts on global positions or local changes.
+
+All six principal Week 06 models were trained for 50,000 steps with batch size 64, AdamW, learning rate $2\times10^{-4}$, weight decay $10^{-4}$, cosine scheduling, EMA, and 1,000 diffusion timesteps. Their packaged evaluation used 100 reverse steps and 1,000 samples per model. Architecture comparisons are made within a representation because the absolute and delta losses operate in different normalization spaces.
+
+\subsection{Temporal Residual Network}
+
+The temporal residual network uses hidden width 128, a timestep embedding of dimension 256, and eight residual temporal blocks. It preserves temporal resolution while repeatedly combining local sequence features with diffusion-time conditioning. Separate models were trained for absolute and delta inputs.
+
+\subsection{Dilated Temporal Residual Network}
+
+The dilated variant expands the temporal receptive field without converting the sequence into a two-dimensional object. It retains the residual formulation and diffusion-time conditioning while connecting temporally distant positions through dilated operations. The experiment tests whether wider temporal context improves route-scale geometry.
+
+\subsection{One-Dimensional U-Net}
+
+The one-dimensional U-Net represents the trajectory at multiple temporal resolutions and combines downsampled context with higher-resolution skip features. It was evaluated under the same absolute/delta and training protocol as the two residual networks. Among the raw models, the absolute U-Net obtained the lowest logged training loss and the highest empirical-support acceptance.
+
+\subsection{Sampling-Time Support Guidance}
+
+The repository implements a differentiable empirical-support distance field. At selected reverse steps, the sampler applies a correction based on
+\[
+E(P)=\frac{1}{T}\sum_{t=1}^{T}D(p_t)^2,
+\]
+where $D$ is the sampled distance field. The systematic packaged comparison used guidance strength 0.1. This is a sampling-only intervention; model parameters are unchanged.
+
+\section{GASF Diffusion}
+
+\subsection{Pixel-Space Two-Dimensional U-Net}
+
+The image pipeline applies diffusion to three-channel $224\times224$ images. The legacy channels contain Hilbert-derived GASF, GADF, and MTF fields. The later constrained channels contain separate-axis GASF matrices and a start heatmap. Although both use a two-dimensional U-Net, they are different representations and have different inverses.
+
+The retained legacy 50,000-step models use a diffusers-style U-Net with two layers per block, widths $(128,128,256,256,512,512)$, one attention stage, and three input/output channels. The Week 04 and Week 05 models use the same model family. The Week 05 systematic study trains six models formed by crossing sigmoid scales 1.0/1.5 with MSE, diagonal, and symmetry objectives.
+
+\subsection{Representation-Aware Objectives}
+
+PureMSE uses only $\mathcal{L}_{\mathrm{simple}}$. Diagonal variants add a mean-square term that favours the retained real-data diagonal target or consistency. Symmetry variants penalize transpose disagreement in channels expected to be symmetric. Legacy experiments additionally test channel standardization, MTF symmetry, and post-hoc channel affine calibration.
+
+The original Week 04 GASF-structure objective attempted to reconstruct off-diagonal structure implied by the decoded diagonal. Both $[0,1]$ and $[-1,1]$ variants became NaN early in training. Protected debug variants ended before reaching the original failure window, so they are inconclusive. These outcomes demonstrate that adding a mathematically motivated constraint can introduce an unstable optimization path without guaranteeing a valid final matrix.
+
+\subsection{Latent GAF Diffusion}
+
+The latent branch compresses legacy images with a convolutional autoencoder and runs a two-dimensional DDPM at $14\times14$ or $28\times28$. Its purpose is computational: full $224\times224$ diffusion scales quadratically with sequence length. The retained $28\times28$ autoencoder achieved MAE 0.039219 and MSE 0.006421; the best rolling diffusion losses were 0.075972 at $14\times14$ and 0.061122 at $28\times28$. Because no FID, KID, or decoded trajectory evaluation was retained, these losses do not establish generative improvement.
+
+\subsection{Decoding Generated Images}
+
+The legacy Hilbert representation requires a learned inverse. The repository contains CNN, ResNet18, multibranch, hybrid, structure-aware, drift-aware, and image-to-sequence latent decoders. Their errors are part of the end-to-end generative pipeline rather than a neutral measurement layer.
+
+The constrained GASF has an analytic diagonal inverse. For Week 05 storage, the generated channels provide $u_t=\sqrt{C_{tt}}$. The sigmoid is inverted with the logit equation in Chapter~\ref{chap:representations}; the blue heatmap provides a soft-argmax start, and deltas are cumulatively integrated. This removes the need for a supervised inverse on valid encodings, but does not constrain the image model to generate such encodings.
+
+\subsection{Consistency and Road Guidance}
+
+GASF consistency guidance differentiates an image-structure energy during sampling. The retained scales 0--0.5 had negligible effect. Road guidance differentiates the distance-field energy through the start heatmap, diagonal square root, sigmoid inverse, and cumulative sum. Full-channel guidance was unstable. Later variants froze or blended the diagonal, clipped decoded deltas at 37.5, and capped endpoint displacement at 1,916. These repairs reduced selected violations but did not close the gap to direct trajectory diffusion.
+
+\chapter{Experimental Evaluation}
+\label{chap:evaluation}
+
+\section{Protocol and Comparability}
+
+The experiments span two datasets and several evaluation populations. Tables in this chapter compare results only within compatible protocols. Image FID is not compared numerically with a trajectory acceptance rate; the metrics are instead placed side by side. Legacy decoder results use 3,159 examples, whereas Week 05/06 generation uses the newer 12,061-trajectory source. Week 03 oracle-bounding-box map results use future path extent and are upper bounds. No multi-seed confidence intervals are available.
+
+\begin{table}[htbp]
+\centering
+\caption{Principal diffusion training and evaluation protocols.}
+\label{tab:protocols}
+\small
+\begin{tabular}{L{0.20\textwidth}L{0.12\textwidth}L{0.12\textwidth}L{0.14\textwidth}L{0.30\textwidth}}
+\toprule
+Phase & Steps & Batch & Learning rate & Evaluation \\
+\midrule
+Legacy pixel DDPM & 50,000 & 8 & $2\times10^{-4}$ & Primary 80-image 25k+50k aggregate; 50/150 DDPM and 150 DDIM reverse steps \\
+Week 04 constrained GASF & 50,000 target & 16, accum. 2 & $2\times10^{-4}$ & Training stability; no retained FID/trajectory benchmark \\
+Week 05 sigmoid GASF & 50,000 & 8, accum. 2 & $2\times10^{-4}$ & 1,000 images per 40k--50k checkpoint; 50 reverse steps \\
+Week 06 raw diffusion & 50,000 & 64 & $2\times10^{-4}$ & 1,000 trajectories/model; 100 reverse steps \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Image-Space Generation}
+
+\subsection{Historical Sanity Experiments}
+
+The historical 128-pixel refactoring run is report-only because its named result tree is absent. With batch size 4, learning rate $2\times10^{-4}$, and EMA, its final loss was 0.004508 after 3,000 steps. FID on 100 samples decreased from 288.81 at 1,000 steps to 254.43 at 2,000 and 226.14 at 3,000. This validates the engineering path but is not a final baseline.
+
+A report-only 224-pixel, 3,000-step matrix compared notebook auxiliary, MSE-only, and data-driven diagonal objectives. Their FIDs were 197.456, 137.419, and 134.957; KID means were 0.2276, 0.1199, and 0.1167. Real mean path length was 2054.49, whereas decoded generated means were 1442.13, 1639.67, and 1679.43. Between 57\% and 69\% of generated samples contained an out-of-range point. The diagonal variant slightly improved FID/KID, while MSE-only had the best out-of-range sample ratio and diversity ratio. These preliminary results first exposed the mismatch between image scores and decoded validity.
+
+\subsection{Legacy 50,000-Step Pixel DDPM}
+
+The primary legacy audit uses 80 images per method, aggregating 40 from checkpoint 25,000 and 40 from checkpoint 50,000. It must not be described as a checkpoint-50k-only estimate.
+
+\begin{table}[htbp]
+\centering
+\caption{Matched legacy image FID by loss and reverse sampler.}
+\label{tab:legacy-fid}
+\begin{tabular}{lrrr}
+\toprule
+Loss & DDPM 50 & DDPM 150 & DDIM 150 \\
+\midrule
+PureMSE & 78.03 & \textbf{74.62} & 93.41 \\
+DataDrivenDiag & 93.93 & \textbf{81.03} & 98.71 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Increasing ancestral reverse steps improved both models, PureMSE won both matched DDPM comparisons, and DDIM was weaker at 150 steps. Evaluation provenance materially affects FID: checkpoint-50k-only 40-image values were 87.9959 and 99.0539, while mixed periodic-sample directories gave 86.3372 and 84.5526 and are retained only as unmatched diagnostics.
+
+ChannelNorm improved mean matching but worsened FID to 130.62/137.00. MTF symmetry loss reduced symmetry error from 0.2715/0.2280 to 0.1207/0.1124, toward the real 0.0673, but FID became 84.98/93.96 and blue-channel saturation became 0.4423/0.3866. Optimizing one structural statistic therefore displaced others.
+
+Post-hoc affine matching of generated channel means and standard deviations to real moments improved PureMSE FID from 74.6189 to 63.2486 and diagonal FID from 81.0313 to 67.6198. This operation uses the real reference moments, slightly worsens global symmetry, and changes generated images without improving the learned generator. It is a diagnostic of channel marginal shift, not the principal generative result.
+
+\repofigure[0.72]{thesis_assets/figures/legacy_ddpm_variants_grid.png}{Representative retained legacy GAF comparison at checkpoint 50,000 with 150 reverse steps. The corresponding checkpoint-only FID uses 40 images and is not the primary 80-image aggregate.}{fig:legacy-grid}
+
+\subsection{Week 05 Sigmoid-GASF Sweep}
+
+\begin{table}[p]
+\centering
+\caption{Week 05 FID over checkpoints using 1,000 samples and 50 reverse steps.}
+\label{tab:week05-fid}
+\small
+\begin{tabular}{L{0.25\textwidth}rrrrrr}
+\toprule
+Model & 40k & 42k & 44k & 46k & 48k & 50k \\
+\midrule
+Sigmoid 1.0, MSE & 78.7878 & 79.7034 & 76.4782 & 73.1179 & 71.2523 & 69.6000 \\
+Sigmoid 1.0, diagonal & 52.8173 & 55.2542 & 55.8920 & 54.0297 & 53.7218 & 58.3155 \\
+Sigmoid 1.0, symmetry & 143.7027 & 141.7514 & 141.4227 & 139.8515 & 139.3601 & 137.4864 \\
+Sigmoid 1.5, MSE & 77.9133 & 77.1691 & 73.7081 & 71.3687 & 67.9659 & 68.2091 \\
+Sigmoid 1.5, diagonal & \textbf{44.5496} & 44.8652 & 47.6087 & 48.0252 & 48.8892 & 52.4143 \\
+Sigmoid 1.5, symmetry & 141.3163 & 138.4636 & 133.9564 & 129.1660 & 133.0479 & 132.7624 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The lowest FID is 44.5496 for sigmoid 1.5 with diagonal loss at 40,000 steps. Its FID worsened at later checkpoints even though training continued. At 50,000 steps, the sigmoid-1.5 diagonal model had total/noise/diagonal loss 0.006084/0.001494/0.091788. The sigmoid-1.5 MSE model had lower total training loss, 0.000912, but higher FID. Training loss, auxiliary consistency, and FID therefore select different outcomes.
+
+The retained absolute-position GASF branch completed 20,000 steps with total loss 0.00280264, noise MSE 0.00038791, and diagonal loss 0.0482946. It has checkpoints and samples but no retained FID or trajectory evaluation, so it cannot resolve whether absolute image encoding avoids delta-integration failure.
+
+\section{Learned Inverse Reconstruction}
+
+\subsection{Historical Absolute and Relative Decoders}
+
+The earliest supervised inverse values are report-only. A train-mean trajectory baseline obtained ADE/FDE 640.89/730.67. The original-style CNN--fully connected decoder improved this to 160.30/201.58, while a relative target integrated from the true start was worse at 212.17/316.28. A scratch ResNet18 absolute decoder achieved 120.9169/186.5896. For the CNN--FC model, ADE correlated strongly with centroid error (0.9825), start error (0.8556), and endpoint error (0.8121), but weakly with the retained length, tortuosity, extent, and turn descriptors. This pointed to global placement as an important error source.
+
+The retained absolute-versus-delta ResNet18 comparison showed a trade-off. Absolute reconstruction was better in raw ADE/FDE, 120.92/186.59 versus 135.29/224.34. Delta prediction was better after start or centroid alignment, had scale-normalized shape ADE 55.15 versus 80.90, and reduced catastrophic tails. Its local delta ADE/FDE was 3.8768/6.4908, yet integrated error remained large.
+
+\subsection{Architecture, Channel, and Loss Ablations}
+
+\begin{table}[p]
+\centering
+\caption{Selected legacy learned-inverse ablations on the 317-sample test split.}
+\label{tab:decoder-ablation}
+\small
+\begin{tabular}{L{0.55\textwidth}rr}
+\toprule
+Decoder/input/loss & Integrated ADE & Integrated FDE \\
+\midrule
+Mid-fusion RGB, $\beta=0.05$ & \textbf{139.43} & \textbf{217.99} \\
+Mid-fusion RGB, $\beta=0.20$ & 141.37 & 234.06 \\
+Mid-fusion normalized, $\beta=0.05$ & 145.58 & 237.31 \\
+Simple CNN RGB, $\beta=0.05$ & 149.34 & 232.32 \\
+Simple CNN normalized, $\beta=0.05$ & 158.56 & 249.70 \\
+Multibranch, $\beta=0$ & 208.27 & 356.35 \\
+Multibranch, $\beta=0.05$ & 162.92 & 257.63 \\
+Multibranch, $\beta=0.20$ (HPC) & 164.93 & 272.77 \\
+Multibranch, $\beta=0.20$ (separate local run) & 153.43 & 249.62 \\
+GASF channel only & 205.26 & 335.30 \\
+GADF channel only & 183.81 & 296.22 \\
+MTF channel only & 397.77 & 720.23 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The common decoder-ablation setting used 100 epochs, batch 16, learning rate 0.001, and split 2,527/315/317. An integrated-path loss helped the drift-prone multibranch model, but excessive weight worsened the main metrics. GADF was the strongest single channel; MTF alone failed badly. The two $\beta=0.20$ multibranch values are retained separately because they come from different run paths and must not be silently substituted.
+
+\subsection{Hybrid, Structural, and Drift-Aware Models}
+
+\begin{table}[htbp]
+\centering
+\caption{Hybrid inverse models.}
+\label{tab:hybrid}
+\begin{tabular}{lrrr}
+\toprule
+Model & Delta ADE & Integrated ADE & Integrated FDE \\
+\midrule
+Hybrid V1 & 8.841 & 125.01 & 170.00 \\
+Hybrid V2 & 5.377 & \textbf{107.85} & \textbf{147.20} \\
+Hybrid V3, mild geometry & 5.449 & 124.95 & 164.06 \\
+Hybrid V3, strong geometry & 5.351 & 132.31 & 184.92 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Hybrid V2 is the strongest retained root-era inverse. Additional geometric losses did not improve it. V1's oracle-start ADE was 524.72 and V2's was 158.46, showing that learned heads could compensate one another rather than independently recovering correct quantities. A learned centroid correction also failed: weights 0.05/0.10/0.20 yielded ADE 226.84/215.63/209.84, whereas inserting the ground-truth correction gave approximately 99--105.
+
+Oracle similarity-transform analyses quantify the placement component but are not deployable. On one retained delta prediction path, raw ADE/FDE 173.41/297.28 improved to 97.48/169.45 after centroid translation and 55.47/94.46 after rotation, uniform scale, and translation. Hybrid V1 improved from 125.01/170.00 to 73.77/120.72 and 57.01/92.20. These are upper bounds and their retained delta raw path differs from the primary 135.29/224.34 summary.
+
+Exact channel structure modestly improved reconstruction. Measured real-image errors were 0 for GASF symmetry, 0.000884 for GADF antisymmetry, and 0.0336 for MTF symmetry. Raw, hard-projected, decomposed, and decomposed-plus-local-MTF ResNet18 inputs obtained integrated ADE/FDE 151.56/255.95, 143.85/247.90, 140.16/235.19, and 138.10/230.69. Explicit drift heads produced only small gains; the best Week 03 correction changed 135.37/230.69 to 131.15/224.09.
+
+\subsection{Sequence-Latent Alignment}
+
+A trajectory autoencoder itself reconstructed accurately: latent size 64 achieved ADE/FDE 2.341/9.342 and size 128 achieved 2.517/11.960. Predicting those latents from images was difficult. Rowwise, temporal-convolution, deeper kernel-7 temporal-convolution, Transformer, and MTF-only Transformer models obtained 239.080/431.800, 178.650/319.650, 137.795/239.577, 146.600/254.415, and 542.484/988.853. A good sequence latent is therefore not automatically accessible from the legacy image.
+
+\section{Map-Aware Reconstruction}
+
+The Week 03 alignment fits 707,616 points from 3,159 trajectories. The affine transform is effectively identity plus translation approximately $[506600,4150650]$, with maximum residual below $10^{-6}$, and generates 3,159 local rasters per crop mode.
+
+\begin{table}[htbp]
+\centering
+\caption{Map-aware inverse models. ``Oracle'' uses future trajectory extent.}
+\label{tab:map-fusion}
+\begin{tabular}{L{0.45\textwidth}rrl}
+\toprule
+Map fusion/crop & ADE & FDE & Deployable conditioning \\
+\midrule
+Early, partial oracle bbox & 159.86 & 266.72 & No \\
+Early, partial start-centred & 168.20 & 293.44 & Yes \\
+Early, full oracle bbox & 155.69 & 258.72 & No \\
+Early, full start-centred & 168.20 & 293.44 & Yes \\
+Late, full oracle bbox & \textbf{123.25} & \textbf{185.39} & No \\
+Late, full start-centred & \textbf{141.27} & \textbf{250.29} & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The strongest map-aware number uses an oracle crop defined by the future path. For that late-fusion oracle model, prediction road distance was 12.55 compared with ground-truth 1.82, and the fractions farther than 10 were 0.462 and 0.00112. Improved reconstruction did not ensure road adherence.
+
+A 108-setting refinement sweep crossed radii 10/15/25, road weights 0.5/1/2/5, reference weights 0.02/0.05/0.1, and curvature weights 0.05/0.1/0.2. The selected setting was radius 25, road weight 5, reference weight 0.02, and curvature 0.05. The retained full application changed ADE 68.230 to 66.424, FDE 121.55 to 119.40, mean road distance 30.25 to 15.59, and fraction farther than 10 from 0.4566 to 0.1706. It uses oracle future crops and a different retained population/scale from Table~\ref{tab:map-fusion}.
+
+\repofigure[0.62]{thesis_assets/figures/map_refinement_oracle_example.png}{A retained oracle-map refinement example showing raw prediction, refined path, and ground truth. The crop uses future trajectory extent and is an upper-bound analysis.}{fig:map-refinement}
+
+\section{Decoded GASF Trajectory Generation}
+
+The selected sigmoid-1.5 diagonal model at 40,000 steps was decoded into 1,000 trajectories. Table~\ref{tab:gasf-trajectory} juxtaposes local and global statistics.
+
+\begin{table}[htbp]
+\centering
+\caption{Decoded GASF samples versus real Week 05/06 trajectories.}
+\label{tab:gasf-trajectory}
+\begin{tabular}{L{0.47\textwidth}rr}
+\toprule
+Metric & Real & Generated GASF \\
+\midrule
+Mean step length & 11.18 & 12.47 \\
+Mean path length & 2,492 & 2,781 \\
+Net displacement & 876.86 & 2,350 \\
+Bounding-box width & 972.61 & 1,665.61 \\
+Bounding-box height & 681.24 & 1,413.89 \\
+Decoded out-of-range fraction & \NA & 0.3505 \\
+Empirical-support mean & Reference support & 417.55 \\
+Empirical-support p95 & Reference support & 1,059.47 \\
+Fraction support distance $>20$ & \NA & 0.6869 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The model approximately matched mean step and path length while greatly overstating net displacement and spatial extent. This combination suggests locally plausible increments with coherent directional drift or inverse error. Image FID did not reveal this global failure.
+
+The initial OSM graph covered only 0.0395\% of real points and had a 2,247-unit northward gap. A replacement graph and offset search improved real road mean/p95 from 25.51/70.16 to 15.49/41.15. Under the final evaluation alignment, generated road mean/p95 remained 220.28/644.65 versus real 15.24/40.40.
+
+\repofigure[0.75]{thesis_assets/figures/osm_coverage_mismatch.png}{Retained Week 05 real-trajectory and OSM-coverage comparison used to diagnose the dataset-specific map-frame mismatch.}{fig:osm-coverage}
+
+\repofigure{thesis_assets/figures/gasf_generated_vs_real_support.png}{Decoded GASF trajectories and real trajectories on the empirical support constructed from 1,000 real examples.}{fig:gasf-support-overlay}
+
+\section{Rejection Filtering}
+
+\begin{table}[htbp]
+\centering
+\caption{Post-hoc rejection results for 1,000 decoded GASF samples.}
+\label{tab:rejection}
+\begin{tabular}{L{0.42\textwidth}rrL{0.25\textwidth}}
+\toprule
+Policy & Accepted & Rate & Accepted support mean/p95 \\
+\midrule
+Strict OSM p95 & 128 & 12.8\% & Not retained \\
+Strict empirical mean 25/p95 75 & 92 & 9.2\% & 16.16/41.56 \\
+Loose p99 & 228 & 22.8\% & Not retained \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the strict OSM filter, overlapping failed-rule counts include 763 failures of road mean, 740 of road p95, and 701 of decoded-range validity. Filtering can improve the retained subset, but discarding 77--91\% of samples is evidence about the weak base distribution, not a generator repair.
+
+\repofigure{thesis_assets/figures/rejection_empirical_metrics.png}{Metric comparison for strict empirical-support rejection. Ninety-two of 1,000 decoded GASF trajectories passed all configured criteria.}{fig:filter-comparison}
+
+\section{Raw Trajectory Diffusion}
+
+\begin{table}[p]
+\centering
+\caption{Raw diffusion training losses and physical/support evaluation on 1,000 samples.}
+\label{tab:raw-results}
+\small
+\begin{tabular}{L{0.19\textwidth}L{0.15\textwidth}rrr rrrr}
+\toprule
+Rep. & Model & Final loss & Accept. & Support mean & Support p95 & Disp. & Bbox W & Bbox H \\
+\midrule
+Real & Reference & \NA & \NA & \NA & \NA & 876.9 & 972.6 & 681.2 \\
+Absolute & ResNet & 0.01545 & 92.7\% & 10.4 & 31.8 & 562.2 & 615.8 & 451.5 \\
+Absolute & Dilated & 0.01412 & 95.9\% & 10.0 & 30.7 & 592.1 & 645.4 & 462.3 \\
+Absolute & 1D U-Net & \textbf{0.01126} & \textbf{98.5\%} & \textbf{8.4} & \textbf{25.6} & 549.7 & 613.5 & 448.5 \\
+Delta & ResNet & 0.05899 & 61.0\% & 43.1 & 103.0 & 456.0 & 531.5 & 361.0 \\
+Delta & Dilated & 0.05455 & 59.2\% & 42.3 & 101.5 & 422.1 & 513.9 & 364.0 \\
+Delta & 1D U-Net & \textbf{0.03866} & 60.5\% & 42.8 & 103.5 & 425.2 & 502.5 & 364.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Within both representations the one-dimensional U-Net achieved the lowest final and minimum logged losses. Loss magnitudes are not compared across absolute and delta normalization spaces. The physical metrics clearly separate the representations: all absolute models attained at least 92.7\% acceptance, whereas delta models were near 60\%. The absolute U-Net obtained the best support distance and 98.5\% acceptance.
+
+All raw models understate real displacement and extent. For the best-validity absolute U-Net, displacement was 549.7 rather than 876.9 and the bounding box was $613.5\times448.5$ rather than $972.6\times681.2$. Its maximum step was 23.7 versus 26.9 for real data. The correct interpretation is high empirical validity or precision, not demonstrated distributional recall.
+
+\repofigure[0.78]{thesis_assets/figures/raw_models_best_median_worst.png}{Retained best/median/worst empirical-support examples across the six raw diffusion models.}{fig:raw-comparison}
+
+\section{Guidance and Post-Processing}
+
+Raw support guidance at strength 0.1 had no consistent benefit. Absolute ResNet and dilated support mean/p95 changed from 10.4/31.8 to 10.61/32.95 and from 10.0/30.7 to 10.15/31.05. The absolute U-Net changed only from 8.4/25.6 to 8.319/25.406. Delta models worsened to approximately 44--46 mean and 105--109 p95.
+
+GASF consistency guidance scales 0--0.5 left FID within 44.548--44.551 and changed mean consistency only from 0.03634191 to 0.03633951. Full-channel road guidance worsened GASF support to approximately 551--600 and saturated the decoded diagonal. A fixed-diagonal version removed saturation and reached 381.93/986.77 at its best strength. Endpoint-capped guidance was the strongest GASF intervention, with support 270.25/706.73, but remained far from raw models and real support.
+
+\begin{table}[htbp]
+\centering
+\caption{GASF road-guidance progression.}
+\label{tab:gasf-guidance}
+\small
+\begin{tabular}{L{0.34\textwidth}rrL{0.35\textwidth}}
+\toprule
+Variant & Support mean & Support p95 & Other retained outcome \\
+\midrule
+Unguided selected GASF & 417.55 & 1,059.47 & Fraction $>20$: 0.6869 \\
+Full-channel guidance & approx. 551--600 & \NA & Diagonal p99 near 1; deltas up to 85 \\
+Fixed diagonal, best strength 1 & 381.93 & 986.77 & Saturation removed \\
+Endpoint cap, strength 1 & \textbf{270.25} & \textbf{706.73} & Displacement 1,960.04; fraction $>20$: 0.645 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Endpoint-capped samples had mean support below 50/100/200/500 for 31.4\%/42.2\%/55.2\%/80.0\% of cases. Guidance improved one part of the distribution but did not produce a generally valid generator.
+
+\section{Direct Representation Comparison}
+
+\begin{table}[p]
+\centering
+\caption{Headline comparison on the Week 05/06 experimental branch. Missing metrics remain unmeasured.}
+\label{tab:headline}
+\small
+\begin{tabular}{L{0.21\textwidth}L{0.15\textwidth}rrrL{0.27\textwidth}}
+\toprule
+Representation/model & Image FID & Acceptance & Support mean/p95 & Displacement & Main caveat \\
+\midrule
+Real reference & \NA & \NA & Reference support & 876.9 & No unconditional score \\
+Delta GASF, sigmoid 1.5 diagonal & 44.5496 & 9.2\% strict empirical & 417.55/1,059.47 before filtering & 2,350 & Image-manifold and inverse violations \\
+Raw absolute 1D U-Net & Not measured & 98.5\% & 8.4/25.6 & 549.7 & Conservative extent; recall unmeasured \\
+Raw delta 1D U-Net & Not measured & 60.5\% & 42.8/103.5 & 425.2 & Integration drift; sampled real start \\
+Absolute-position GASF, 20k & Not measured & Not measured & Not measured & Not measured & Training complete, evaluation missing \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The table does not rank FID against acceptance. It shows that the metric with the strongest image-space value belongs to a model with poor decoded physical validity, whereas the strongest physical model has no image representation and thus no FID. A fair final benchmark must use trajectory-space distributional metrics for every representation.
+
+\chapter{Failure Analysis}
+\label{chap:failures}
+
+\section{Legacy Representation Loss}
+
+The legacy representation combines four transformations that complicate generation: fixed-length squeezing or reflection, global two-dimensional normalization, Hilbert scalarization, and quantized image storage. The output is useful as a structured image, but does not retain a deterministic inverse to the original two-dimensional path. Consequently, every legacy generation result depends on a separately learned decoder.
+
+The inverse experiments show that the representation remains informative: a ResNet18 absolute decoder greatly outperformed a train-mean baseline, structure-aware inputs provided modest additional gains, and Hybrid V2 reached ADE/FDE 107.85/147.20. The residual error nevertheless remains large enough that a decoded generated image combines generator error with inverse-model error. Improvements in legacy FID cannot be interpreted independently of that second stage.
+
+Float and PNG round trips further isolate storage loss. Correctly aligned float constrained GASF is accurate to approximately $10^{-5}$--$10^{-4}$, while inspected PNG round trips yield ADE from roughly 0.5 to above 10 and maxima around 23. Quantization is therefore a substantive transformation for an inverse task even when it may be acceptable for texture recognition.
+
+\section{Sign Ambiguity and Inverse Conditioning}
+
+The $[-1,1]$ diagonal identity recovers magnitude but not sign. This is a property of the transformation, not a deficiency of the diffusion model. The $[0,1]$ encoding removes that ambiguity for valid real samples, but changes the numerical problem rather than eliminating every inverse failure.
+
+The Week 05 inverse contains a square root followed by a logit. When a generated diagonal approaches 0 or 1, small image errors produce disproportionately large displacement changes. Full-channel map guidance revealed this sensitivity by driving diagonal values toward one and creating deltas up to approximately 85. Clipping and diagonal blending reduce the symptom but introduce additional post-processing assumptions.
+
+\section{Pixel-Manifold Violation}
+
+A valid GASF matrix is a nonlinear, low-dimensional object. A length-224 scalar sequence determines 50,176 matrix entries, but those entries are not independent. Symmetry is necessary, and diagonal agreement is necessary for decoding, yet neither alone guarantees that every off-diagonal element is compatible with the same underlying sequence.
+
+This mismatch explains the inconsistent effects of representation-aware losses. Legacy MTF symmetry substantially improved the target symmetry statistic while worsening FID and increasing blue-channel saturation. Week 05 symmetry objectives had the weakest FID of the six systematic runs. The best diagonal objective improved image FID but produced poor decoded trajectories. The more ambitious Week 04 structure objective became NaN. Each intervention targeted only part of a globally constrained matrix.
+
+\section{Cumulative Drift and Physical Constraint Violation}
+
+Displacement errors accumulate under integration. The multibranch decoder without integrated loss had delta ADE 6.59 but trajectory ADE/FDE 208.27/356.35. Explicit integrated loss, global heads, and drift correction all helped to varying degrees, but no learned inverse removed the problem.
+
+The same mechanism appears in unconditional generation. Raw delta models, even with empirical starting points, reached only 59.2--61.0\% support acceptance and under-represented maximum step. The decoded GASF generator had near-real mean step and path length but greatly excessive net displacement and extent. These findings show why local reconstruction or step statistics are insufficient for judging an integrated path.
+
+\section{Metric Mismatch}
+
+FID is computed using image features and does not penalize endpoint error, support distance, map continuity, or decoded-range failure directly. It is also sensitive to evaluation protocol in this workspace. The legacy PureMSE estimate varies from 74.6189 on an 80-image checkpoint aggregate to 87.9959 on 40 checkpoint-50k images. Post-hoc channel calibration reduces FID to 63.2486 without improving the learned generator.
+
+The Week 05 best FID occurs at 40,000 steps and worsens with later training, while final component losses do not select the same checkpoint or objective. FID remains useful for comparing matched image runs, but cannot be the primary outcome for trajectory synthesis.
+
+The raw result has the complementary limitation. Acceptance and support distance show high validity, but do not prove route coverage or diversity. Smaller displacement and extent suggest that a conservative distribution may obtain favourable precision-like metrics. No matched trajectory precision/recall, energy distance, MMD, or multi-seed interval was retained.
+
+\section{Map-Frame Mismatch}
+
+The Week 03 affine transform was accurate for the legacy source, with residual below $10^{-6}$. Reusing its map context for the newer source was invalid. The initial Week 06 graph covered only 0.0395\% of points and missed the data northward by 2,247. A new graph and offset search substantially improved real-data road distance.
+
+This error is methodological rather than merely operational: an incorrect coordinate frame makes every road-validity conclusion meaningless. The corrected generated GASF road distances remained poor, so the final negative conclusion survives the repair, but only after re-establishing a valid real-data reference.
+
+\section{Failed, Incomplete, and Operational Attempts}
+
+The unsuccessful history is part of the scientific record:
+
+\begin{itemize}
+  \item The two original Week 04 GASF-structure losses became NaN near steps 490 and 620. Safe debug runs stopped at 170/180, before the failure window, and are inconclusive.
+  \item A float-data Week 04 run reached step 33,390 before a scheduler time limit and did not yield a final matched evaluation.
+  \item The first $[-1,1]$ diagnostic failed with a missing metric key; the corrected rerun produced the valid sign-ambiguity results.
+  \item A latent DDPM directory is explicitly marked as a bad baseline, while the principal latent branches lack generative evaluation.
+  \item The initial six raw-model submissions produced no result because the log directory was absent. Successful resubmissions completed the scientific comparison.
+  \item GASF consistency guidance was effectively neutral, full-channel road guidance worsened support and saturated diagonals, and raw guidance at strength 0.1 had no consistent benefit.
+  \item The absolute-position GASF model completed training but lacks FID and trajectory evaluation.
+  \item Historical notebook variants involving map channels, invalid-point/BCE or binary losses, and LSTM-style correction are described in a report without retained notebooks or quantitative artifacts. They are documented but not assigned numerical conclusions.
+\end{itemize}
+
+\section{Oracle Conditioning and Post-Selection}
+
+Several favourable results depend on information unavailable in unconditional deployment. Oracle-bounding-box map crops use future trajectory extent. The selected map-refinement population also uses oracle local maps. Similarity-transform results fit predictions directly to ground truth. Raw delta generation samples real starts. Rejection filtering reports the quality of a selected minority rather than the base distribution.
+
+These experiments remain valuable as upper bounds or diagnostics, provided their conditioning is explicit. They estimate where errors arise, but must not be ranked as deployable generators alongside unconditional absolute diffusion.
+
+\chapter{Discussion}
+\label{chap:discussion}
+
+\section{Answer to the Main Research Question}
+
+For the retained dataset, implementations, and metrics, direct absolute-coordinate sequences are the strongest current representation for unconditional trajectory synthesis. They have a deterministic inverse, avoid cumulative integration, expose physically meaningful coordinates to the model, and permit evaluation and guidance in the same space as the generated object. The one-dimensional U-Net attains 98.5\% empirical acceptance and support distance 8.4/25.6.
+
+This answer is conditional rather than universal. The raw model understates real displacement and bounding-box extent, no matched trajectory-space recall metric is retained, and only one seed is available. The evidence establishes a large validity advantage over the selected delta-GASF pipeline, not complete distributional dominance.
+
+\section{Pixel Space versus Trajectory Space}
+
+In raw diffusion, a model error acts on a coordinate or displacement with direct temporal meaning. In GASF diffusion, an image error can affect a diagonal value, an off-diagonal consistency relation, an inverse normalization, a start estimate, and every later integrated position. Physical constraints that are local in trajectory space become non-local functions of many pixels.
+
+The dimensional expansion is also important. Each scalar length-224 axis becomes a $224\times224$ matrix. The redundancy may be useful for pattern extraction but requires the generator to reproduce a constrained texture whose nominal degrees of freedom greatly exceed those of the source. The retained structure losses and guidance studies indicate that imposing isolated matrix properties does not reliably project samples onto the complete valid set.
+
+\section{Why Classification Evidence Does Not Transfer Automatically}
+
+The repository contains no retained classification accuracy comparison, so this thesis does not claim an empirical classification improvement. It instead explains why a representation that is attractive for discrimination can still be difficult for generation.
+
+A classifier requires features sufficient to separate labels. It may exploit global pairwise texture, symmetry, and repeated motifs, and can tolerate the absence of an exact inverse. A generator must reproduce every quantity needed to reconstruct a plausible path. Discriminative sufficiency is therefore weaker than generative sufficiency. The modest gains of structure-aware inverse models show that the textures contain useful information, while Week 06 demonstrates that sampling a globally consistent and physically valid texture is a different problem.
+
+\section{What the Raw Result Establishes}
+
+The best raw result establishes high empirical-support precision under the retained acceptance policy. It also shows that absolute position is easier than integrated delta generation in this implementation. It does not establish realistic diversity, region coverage, route-frequency matching, or likelihood. The smaller displacement and extent are consistent with conservative generation and possibly mode shrinkage, but the absence of a matched recall metric prevents a stronger diagnosis.
+
+\section{The Role of Maps}
+
+Maps are valuable first as an evaluation frame. The map-alignment failure showed that real-data coverage must be verified before generated samples are scored. Map context also helped selected supervised inverse models, particularly with oracle crops, and differentiable refinement improved road distance under oracle conditions.
+
+Sampling-time map guidance was less reliable. Raw models did not benefit consistently, and gradients through the GASF inverse produced harmful saturation and geometry trade-offs. The retained evidence therefore motivates map context as an explicit training condition more strongly than as late correction, although that proposed comparison has not yet been performed.
+
+\section{Threats to Validity}
+
+\begin{table}[p]
+\centering
+\caption{Principal threats to validity.}
+\label{tab:threats}
+\small
+\begin{tabular}{L{0.18\textwidth}L{0.75\textwidth}}
+\toprule
+Category & Threat \\
+\midrule
+Internal & Single training seeds; sample-count differences; checkpoint-selection effects; report-only historical runs; first-job operational failures; incomplete latent and absolute-GASF evaluation. \\
+Construct & Natural-image FID on scientific matrices; acceptance without trajectory-space recall; nearest-road distance instead of quantitative route map matching. \\
+Data & Two non-identical sources; fixed-length bounce reversals and truncation; possible window leakage requiring final verification; only 40 naturally length-224 trajectories in the newer source. \\
+Conditioning & Empirical starts for raw delta; future-bbox oracle maps; oracle similarity transforms; post-selection by rejection. \\
+Spatial & Dataset-specific map calibration; planar units treated as metres in the OSM branch; selected offset estimated from retained data. \\
+External & Results concern the retained traffic data and fixed length 224; no evidence supports generalization to other networks, durations, or sampling intervals. \\
+Reproducibility & No notebooks retained; an older result tree is absent; no multi-seed confidence intervals; exact software and OSM-version freeze remains to be recorded. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\chapter{Future Work}
+\label{chap:future}
+
+\section{Matched Final Benchmark}
+
+The first priority is a single held-out protocol for the selected raw absolute, raw delta, delta-GASF, and retained absolute-position GASF checkpoints. Every model should use the same real reference, sample count, random-seed set, coordinate transform, empirical support, and map graph. The absolute-position GASF checkpoint must first be sampled and decoded; until then the comparison cannot isolate image-manifold error from delta integration drift.
+
+\section{Trajectory-Space Precision, Recall, and Diversity}
+
+The benchmark should add distributional measurements defined directly on trajectories. The repository gaps motivate route or region coverage, pairwise diversity, nearest-neighbour novelty, displacement and extent histograms, and a consistent trajectory embedding for precision/recall, MMD, or energy distance. Bootstrap intervals should be reported for both real and generated populations. These proposed metrics are future evaluations, not current results.
+
+\section{Variable-Length Modelling}
+
+Only 40 newer trajectories naturally have length 224, and bounce/truncate changes the empirical sequence. Masked diffusion, duration conditioning, or physically meaningful resampling should be evaluated to avoid artificial reversal and discarded endpoints. Vehicle-level splitting must precede window extraction.
+
+\section{Map-Conditioned Generation}
+
+The map should be supplied during training rather than only through sampling gradients. Candidate conditions already motivated by the repository include start/end locations, local raster or vector road context, and route region. Any classifier-free or other guidance study should be compared with the unguided generator using identical physical and coverage metrics.
+
+\section{Physical and Kinematic Constraints}
+
+The current benchmark measures steps, extent, displacement, and support. Future trajectory-space objectives should also evaluate speed, acceleration, jerk, curvature, heading, endpoint, and continuity constraints where the source data support them. A velocity/heading parameterization could be compared with Cartesian deltas, but no outcome should be assumed in advance.
+
+\section{Multi-Seed Statistical Evaluation}
+
+At least three seeds are needed for finalist models. Checkpoint selection should use a predeclared validation rule, and final tables should include uncertainty from training seed and finite generated samples. This is especially important for the legacy 40--80-image FID estimates and for interpreting the early Week 05 FID optimum.
+
+\section{Quantitative Map Matching}
+
+The retained LCSS wrapper should be completed and its match success, route continuity, and error statistics stored. This would distinguish a path that is close to some road at every point from a path that follows a coherent route. The graph source, download date, bounding box, CRS, and affine/offset parameters must be frozen with the evaluation.
+
+\section{Constrained GASF Alternatives}
+
+If GASF remains a central generative representation, one direct alternative is to generate the underlying length-$T$ angular or normalized sequence and construct the matrix deterministically. A second is explicit projection onto the valid Gramian set after each relevant update. Both proposals reduce unconstrained $T^2$ prediction, but their benefit has not been evaluated in the current repository.
+
+\chapter{Conclusion}
+\label{chap:conclusion}
+
+This thesis reconstructed and compared the full retained experimental path from legacy Hilbert--GAF images to constrained GASF and direct trajectory diffusion. The archaeology preserves successful, failed, incomplete, and report-only experiments instead of selecting only favourable outcomes.
+
+The representation analysis shows that float $[0,1]$ separate-axis GASF is almost exactly invertible for valid real encodings. The main GASF generation failure is therefore not universal information loss. It is the difficulty of sampling a globally consistent image on the valid Gramian manifold and passing it through a bound-sensitive inverse and cumulative integration. The legacy representation has the additional disadvantage of requiring an imperfect learned inverse.
+
+The best retained image model achieved FID 44.5496, but its decoded empirical-support mean/p95 was 417.55/1059.47 and strict empirical acceptance was 9.2\%. Structural losses, consistency guidance, road guidance, and rejection improved selected properties or selected subsets but did not solve overall validity. Direct absolute-coordinate diffusion with a one-dimensional U-Net achieved 98.5\% acceptance and support 8.4/25.6. Its displacement and extent remained too small, so diversity and recall are unresolved.
+
+The final answer to the main question is therefore task-dependent but clear under the present evidence: for unconditional traffic trajectory synthesis, direct absolute-coordinate modelling is preferable because the training objective, inverse, constraints, and evaluation remain in the physical trajectory space. GASF retains value as a structural representation and possibly as a discriminative feature space, but it is not automatically an effective generative coordinate system. Representation is not a preprocessing detail; it is part of the generative model.
+
+\appendix
+
+\chapter{Complete Experiment Ledger}
+\label{app:ledger}
+
+\small
+\begin{longtable}{L{0.10\textwidth}L{0.28\textwidth}L{0.16\textwidth}L{0.39\textwidth}}
+\caption{Condensed ledger of every scientific experiment card in \texttt{experiment\_inventory.md}.}\label{tab:ledger}\\
+\toprule
+ID & Experiment & Evidence status & Retained conclusion \\
+\midrule
+\endfirsthead
+\toprule
+ID & Experiment & Evidence status & Retained conclusion \\
+\midrule
+\endhead
+P0.1 & Legacy Hilbert--GAF construction & Measured/reconstructed & Dataset built and reused; no analytic two-dimensional inverse. \\
+P0.2 & Constrained-GASF invertibility & Measured & Float $[0,1]$ nearly exact; $[-1,1]$ diagonal loses sign; PNG quantization is material. \\
+P0.3 & Fixed-length policy comparison & Measured & Bounce/truncate retains all IDs but creates reversals/truncation; windows exclude 72.45\% of IDs. \\
+P1.0 & 128-pixel 3k DDPM sanity run & Report-only & FID 288.81 to 226.14; engineering validation, not a scientific endpoint. \\
+P1.0b & 224-pixel 3k objective matrix & Report-only & MSE/diagonal improve image scores over notebook auxiliary, but decoded validity remains weak. \\
+P1.1 & Legacy PureMSE vs diagonal DDPM & Measured & PureMSE wins matched FID at 50 and 150 DDPM steps; no reliable inverse. \\
+P1.2 & ChannelNorm and MTF-symmetry ablation & Measured & Individual statistics improve while FID or saturation worsens. \\
+P1.3 & DDPM/DDIM sampler ablation & Measured & 150-step ancestral DDPM is strongest retained legacy sampler. \\
+P1.4 & Post-hoc channel calibration & Measured diagnostic & FID improves using real moments; generator and structural validity do not. \\
+P2.0 & Historical absolute/relative decoders & Report-only & ResNet capacity improves inverse; relative target is worse in aggregate. \\
+P2.1 & GAF autoencoder and latent DDPM & Measured, incomplete & Reconstruction/training losses retained; no generative or trajectory benchmark. \\
+P2.2 & Decoder architecture/channel/loss study & Measured & Learned inverse is possible but cumulative drift remains; MTF alone fails. \\
+P2.3 & Hybrid/global/geometry heads & Measured & Hybrid V2 is best root-era inverse; geometry and learned centroid correction do not improve it. \\
+P2.4 & Oracle similarity upper bound & Measured upper bound & Global placement explains a large error component; not deployable. \\
+P3.1 & Structural projection/decomposition & Measured & Mathematical channel structure gives modest inverse improvement. \\
+P3.2 & Drift-aware correction heads & Measured & Corrections improve ADE/FDE by only about 2--3\%; stronger weighting hurts. \\
+P3.3 & Sequence-latent alignment & Measured & Trajectory AE is accurate, but image-to-latent alignment remains weak; MTF-only fails. \\
+P3.4 & Legacy coordinate-to-OSM alignment & Measured & Dataset-specific affine is internally accurate and must not be reused across sources. \\
+P3.5 & Map-aware decoder fusion & Measured & Oracle late fusion is strongest; deployable start-centred result is weaker. \\
+P3.6 & Differentiable map refinement & Measured oracle upper bound & Road proximity improves under an oracle crop; population differs from decoder table. \\
+P4.1 & Week 04 six-run constrained-GASF matrix & Measured/incomplete & Four runs stable to about 40.6k; both full structure losses become NaN; no trajectory evaluation. \\
+P4.2 & Float and safe-structure debug & Incomplete & Float run hits time limit; safe jobs stop before original NaN window. \\
+P5.1 & Week 05 sigmoid-GASF matrix & Measured & Best image FID 44.5496 at sigmoid 1.5, diagonal, 40k. \\
+P5.2 & GASF consistency guidance & Measured negative & FID and consistency are effectively unchanged. \\
+P5.3 & Absolute-position GASF & Training complete, evaluation missing & 20k checkpoint retained; no FID or trajectory benchmark. \\
+P6.1 & GASF decode and map diagnosis & Measured & Best-FID image model yields expansive, off-support trajectories; map frame repaired before final conclusion. \\
+P6.2 & GASF rejection filters & Measured & Strict empirical acceptance 9.2\%; loose p99 acceptance 22.8\%. \\
+P6.3 & Six raw diffusion models & Measured & Absolute 1D U-Net has 98.5\% acceptance but conservative extent. \\
+P6.4 & Raw support guidance & Measured negative & Strength 0.1 provides no consistent improvement. \\
+P6.5 & GASF road guidance & Measured negative/partial & Endpoint cap improves support to 270.25/706.73 but remains far from raw models. \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\chapter{Hyperparameters and Checkpoint Status}
+\label{app:hyperparameters}
+
+\begin{longtable}{L{0.23\textwidth}L{0.29\textwidth}L{0.39\textwidth}}
+\caption{Principal retained hyperparameters and checkpoint status.}\label{tab:hyperparameters}\\
+\toprule
+Experiment family & Training configuration & Checkpoint/evaluation status \\
+\midrule
+\endfirsthead
+\toprule
+Experiment family & Training configuration & Checkpoint/evaluation status \\
+\midrule
+\endhead
+Legacy Hilbert encoding & Length 224; Hilbert tolerance 0.0037; MTF bins 8 & Paired data and image artifacts retained. \\
+Historical 128 DDPM & 3k; batch 4; lr $2\times10^{-4}$; EMA; 100 samples & Report-only; named checkpoints absent. \\
+Historical 224 matrix & 3k; batch 2; accumulation 2; lr $10^{-4}$; EMA; 100 samples & Report-only; named directories absent. \\
+Legacy pixel DDPM & 50k; batch 8; AdamW; lr $2\times10^{-4}$; cosine/warmup; 1,000 diffusion steps; EMA; seed 42 & Checkpoints including 25k/50k/final retained; primary 80-image aggregate. \\
+Decoder ablation & 100 epochs; batch 16; lr $10^{-3}$; split 2,527/315/317 & Best checkpoints and summaries retained. \\
+Historical CNN/ResNet inverse & Up to 1,000 epochs; batch 8; lr $10^{-4}$; dropout 0.3; patience 80; seed 42 & Report-only output tree absent. \\
+Latent GAF DDPM & Autoencoder 50 epochs; principal diffusion runs 50k; latent size 14 or 28 & Checkpoints retained; FID/trajectory metrics missing. \\
+Week 04 constrained GASF & Target 50k; batch 16; accumulation 2; lr $2\times10^{-4}$; 1,000 diffusion steps; EMA & Four 40k checkpoints valid; structure-loss runs invalid; float/debug partial. \\
+Week 05 GASF & 50k; batch 8; accumulation 2; lr $2\times10^{-4}$; 1,000 diffusion steps; EMA & All six full checkpoint series retained; selected sigmoid-1.5 diagonal 40k. \\
+Absolute-position GASF & 20k; batch 8; sigmoid 1.5; diagonal weight 0.05 & Eleven checkpoint directories/final retained; scientific evaluation missing. \\
+Week 06 raw diffusion & 50k; batch 64; AdamW; lr $2\times10^{-4}$; wd $10^{-4}$; cosine; EMA; 1,000 diffusion steps & All six checkpoint series/final and 1,000-sample packages retained. \\
+\bottomrule
+\end{longtable}
+
+\chapter{Additional Quantitative Tables}
+\label{app:tables}
+
+\section{Week 04 Stability Matrix}
+
+\begin{table}[htbp]
+\centering
+\caption{Week 04 constrained-GASF training outcomes.}
+\label{tab:week04-status}
+\small
+\begin{tabular}{L{0.19\textwidth}L{0.20\textwidth}L{0.25\textwidth}rL{0.20\textwidth}}
+\toprule
+Normalization & Objective & Status & Last loss & Valid checkpoint \\
+\midrule
+$[0,1]$ & MSE & Stopped near 40,610 & 0.000578 & 40k \\
+$[0,1]$ & Symmetry & Stopped near 40.6k & 0.000609 & 40k \\
+$[0,1]$ & GASF structure & NaN near 490 & NaN & No \\
+$[-1,1]$ & MSE & Stopped near 40.6k & 0.000615 & 40k \\
+$[-1,1]$ & Symmetry & Stopped near 40.6k & 0.000640 & 40k \\
+$[-1,1]$ & GASF structure & NaN near 620 & NaN & No \\
+Float $[0,1]$ & MSE & Time limit at 33,390 & Partial & Partial \\
+Safe structure & Protected & Stopped at 170/180 & Finite & Inconclusive \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Week 05 Final Loss Components}
+
+\begin{table}[htbp]
+\centering
+\caption{Week 05 final 50,000-step component losses.}
+\label{tab:week05-losses}
+\begin{tabular}{L{0.35\textwidth}rrr}
+\toprule
+Model & Total & Noise MSE & Auxiliary \\
+\midrule
+Sigmoid 1.0, MSE & 0.000807 & 0.000807 & \NA \\
+Sigmoid 1.0, diagonal & 0.004644 & 0.001147 & 0.069941 \\
+Sigmoid 1.0, symmetry & 0.000937 & 0.000888 & 0.000986 \\
+Sigmoid 1.5, MSE & 0.000912 & 0.000912 & \NA \\
+Sigmoid 1.5, diagonal & 0.006084 & 0.001494 & 0.091788 \\
+Sigmoid 1.5, symmetry & 0.001033 & 0.000993 & 0.000807 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Raw Minimum Losses and Maximum Step}
+
+\begin{table}[htbp]
+\centering
+\caption{Additional raw diffusion diagnostics.}
+\label{tab:raw-additional}
+\begin{tabular}{llrr}
+\toprule
+Representation & Architecture & Minimum logged loss & Maximum step \\
+\midrule
+Real & Reference & \NA & 26.9 \\
+Absolute & Temporal ResNet & 0.01374 & 24.4 \\
+Absolute & Dilated ResNet & 0.01250 & 23.9 \\
+Absolute & 1D U-Net & 0.01010 & 23.7 \\
+Delta & Temporal ResNet & 0.05180 & 12.0 \\
+Delta & Dilated ResNet & 0.04801 & 11.9 \\
+Delta & 1D U-Net & 0.03347 & 11.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Unavailable or Incomplete Metrics}
+
+\begin{longtable}{L{0.30\textwidth}L{0.63\textwidth}}
+\caption{Requested result families that are absent or incomplete.}\label{tab:missing-results}\\
+\toprule
+Metric & Status \\
+\midrule
+\endfirsthead
+\toprule
+Metric & Status \\
+\midrule
+\endhead
+FID & Present for legacy pixel and Week 05 delta-GASF; absent for latent, Week 04, raw, and absolute-position GASF branches. \\
+KID & Historical 3k values exist in a report; no retained final cross-model KID benchmark. \\
+Map-matching error & No retained LCSS result; available values are nearest-road, coverage, support, or distance-field metrics. \\
+Trajectory-space diversity/coverage & Some diagnostic/novelty code exists, but no matched raw-versus-GASF precision/recall result. \\
+Multi-seed confidence intervals & Missing for every principal model. \\
+Held-out conditional likelihood & Missing. \\
+\bottomrule
+\end{longtable}
+
+\chapter{Retained Figure and Artifact Guide}
+\label{app:figures}
+
+The workspace contains thousands of repeated per-sample plots. The body selects a small set of representative, retained artifacts. Principal paths are listed below so that later thesis editing can replace or regroup them without searching the complete repository.
+
+\begin{longtable}{L{0.49\textwidth}L{0.44\textwidth}}
+\caption{Principal retained thesis-ready figures.}\label{tab:figure-guide}\\
+\toprule
+Repository path & Content/use \\
+\midrule
+\endfirsthead
+\toprule
+Repository path & Content/use \\
+\midrule
+\endhead
+\path{thesis_assets/figures/gaf_structure_components.png} & Legacy GAF channels and structural components; representation/background. \\
+\path{thesis_assets/figures/legacy_ddpm_variants_grid.png} & Legacy pixel-DDPM representative images; image evaluation. \\
+\path{thesis_assets/figures/map_refinement_oracle_example.png} & Oracle map refinement example; map-aware reconstruction. \\
+\path{thesis_assets/figures/osm_coverage_mismatch.png} & Real-data/OSM coverage diagnosis; failure analysis. \\
+\path{thesis_assets/figures/gasf_generated_vs_real_support.png} & Decoded GASF versus real empirical support; principal failure figure. \\
+\path{thesis_assets/figures/rejection_empirical_metrics.png} & Strict empirical-filter comparison; rejection results. \\
+\path{thesis_assets/figures/gasf_accepted_contact_osm.png} & Accepted GASF subset on corrected OSM; appendix/post-selection illustration. \\
+\path{thesis_assets/figures/raw_models_best_median_worst.png} & Six-model raw best/median/worst support comparison; headline raw result. \\
+\bottomrule
+\end{longtable}
+
+\repofigure[0.70]{thesis_assets/figures/gasf_accepted_contact_osm.png}{Contact sheet of the accepted decoded-GASF subset on the corrected OSM frame. This visualizes post-selected samples and not the unfiltered generator distribution.}{fig:accepted-contact}
+
+\chapter{Reproducibility Checklist}
+\label{app:reproducibility}
+
+Before thesis submission, the retained workspace should be frozen with the following metadata. The list records missing documentation rather than claiming it has already been completed.
+
+\begin{enumerate}
+  \item Git commit and dirty-worktree state at thesis freeze.
+  \item Input-file checksums, schemas, and the exact vehicle-level split metadata.
+  \item Verification that splitting precedes any overlapping window extraction.
+  \item Software, CUDA, and package versions for each principal phase.
+  \item Random seeds for training, checkpoint selection, real-reference sampling, and generation.
+  \item Checkpoint and generated-array hashes for the selected GASF and raw models.
+  \item OSM graph source, download date, bounding box, CRS, affine transform, and selected offset.
+  \item A permanent note that no \texttt{.ipynb} file and no historical \texttt{experiments/} tree were present at archaeology time.
+  \item Clear labels for report-only, measured, reconstructed, missing, oracle, and non-comparable results.
+\end{enumerate}
+
+\end{document}

@@ -1,0 +1,16 @@
+{
+  "source": "computed_from_training_images",
+  "data_dir": "/home/jliu/Thesis/week04/data_constrained_gasf_dxdy_start_neg11/images",
+  "image_size": 224,
+  "num_images": 3159,
+  "diag_targets": [
+    -0.8481890043320502,
+    -0.8978876781455772,
+    -0.9975962148018965
+  ],
+  "gasf_channels": [
+    0,
+    1
+  ],
+  "notes": "Targets are in diffusion tensor space [-1,1]. Gasf_structure uses channels 0 and 1 only."
+}
